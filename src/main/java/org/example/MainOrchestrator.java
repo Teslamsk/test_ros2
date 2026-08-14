@@ -11,8 +11,7 @@ public class MainOrchestrator {
         System.out.println("=== Main Orchestrator Started ===");
         TopicInterface ros = new TopicInterface("orchestrator_node");
         CanController can = new CanController();
-        Node motor = Node.STEPPER_1;
-        can.init(motor, "/dev/can0");
+        can.init("/dev/can0");
 
         float angle = 0;
         int scanSteps = 36;

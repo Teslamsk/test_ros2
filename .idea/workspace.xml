@@ -4,25 +4,11 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="64d1bba3-4914-40e3-8271-4604aecbe680" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/checkstyle-idea.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/encodings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/uiDesigner.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/pom.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/aold/PubSubDemo.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/org/example/MainOrchestrator.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/org/example/TopicInterface.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/org/example/can/CanController.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/org/example/can/dictionary/CanOD.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/org/example/can/dictionary/CanPDO.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/org/example/can/dictionary/ControlWord.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/org/example/can/dictionary/Node.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/org/example/can/dictionary/OperationMode.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/main/java/org/example/can/dictionary/StatusWord.java" afterDir="false" />
+    <list default="true" id="64d1bba3-4914-40e3-8271-4604aecbe680" name="Changes" comment="Базовые классы на пути в работе.">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pom.xml" beforeDir="false" afterPath="$PROJECT_DIR$/pom.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main/java/org/example/MainOrchestrator.java" beforeDir="false" afterPath="$PROJECT_DIR$/src/main/java/org/example/MainOrchestrator.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main/java/org/example/can/CanController.java" beforeDir="false" afterPath="$PROJECT_DIR$/src/main/java/org/example/can/CanController.java" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -55,7 +41,7 @@
     &quot;project.structure.side.proportion&quot;: &quot;0.0&quot;
   }
 }</component>
-  <component name="RunManager">
+  <component name="RunManager" selected="JUnit.CanControllerTest">
     <configuration name="PubSubDemo" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
       <envs>
         <env name="FASTDDS_SHM_TRANSPORT" value="0" />
@@ -68,6 +54,21 @@
           <option name="ENABLED" value="true" />
         </pattern>
       </extension>
+      <method v="2">
+        <option name="Make" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="CanControllerTest" type="JUnit" factoryName="JUnit" temporary="true" nameIsGenerated="true">
+      <module name="ros2-demo" />
+      <extension name="coverage">
+        <pattern>
+          <option name="PATTERN" value="org.example.can.*" />
+          <option name="ENABLED" value="true" />
+        </pattern>
+      </extension>
+      <option name="PACKAGE_NAME" value="org.example.can" />
+      <option name="MAIN_CLASS_NAME" value="org.example.can.CanControllerTest" />
+      <option name="TEST_OBJECT" value="class" />
       <method v="2">
         <option name="Make" enabled="true" />
       </method>
@@ -87,6 +88,7 @@
     </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="JUnit.CanControllerTest" />
         <item itemvalue="Application.PubSubDemo" />
       </list>
     </recent_temporary>
@@ -100,7 +102,20 @@
       <option name="presentableId" value="Default" />
       <updated>1786523654780</updated>
     </task>
+    <task id="LOCAL-00001" summary="Базовые классы на пути в работе.">
+      <option name="closed" value="true" />
+      <created>1786704937404</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1786704937404</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="Базовые классы на пути в работе." />
+    <option name="LAST_COMMIT_MESSAGE" value="Базовые классы на пути в работе." />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>

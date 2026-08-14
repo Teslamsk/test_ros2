@@ -1,11 +1,7 @@
 package org.example.can;
 
-import org.example.can.dictionary.CanOD;
-import org.example.can.dictionary.CanPDO;
-import org.example.can.dictionary.ControlWord;
-import org.example.can.dictionary.Node;
-import org.example.can.dictionary.OperationMode;
-import org.example.can.dictionary.StatusWord;
+import org.example.can.dictionary.*;
+import org.example.can.transport.CanBus;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -39,22 +35,6 @@ import java.util.stream.Collectors;
  */
 public class CanController implements AutoCloseable {
 
-    /**
-     * MotorMode — три предустановленных "режима жесткости" для нашего лида́ра.
-     * <p>
-     * Это не режимы CANopen (они в OperationMode), а наши высокоуровневые
-     * настройки: как сильно двигатель должен "держать" позицию и можно ли
-     * его повернуть руками.
-     * <p>
-     * Под капотом каждый режим меняет:
-     * - режим работы привода (POSITION или TORQUE),
-     * - коэффициент жесткости (P-Gain),
-     * - максимальный крутящий момент (Max Torque).
-     * <p>
-     * HAND    → двигатель "отпущен", можно вращать валик рукой (moment = 0).
-     * RELAXED → удержание, но мягкое (можно повернуть усилием).
-     * LOCKED  → жесткая фиксация (сканирование без биений).
-     */
     public enum MotorMode {
         HAND("Двигатель отпущен — можно крутить рукой"),
         RELAXED("Мягкое удержание — можно повернуть усилием"),
@@ -74,24 +54,61 @@ public class CanController implements AutoCloseable {
     private static final float LOCKED_P_GAIN = 300.0f;
     private static final float LOCKED_MAX_TORQUE = 1000.0f;
 
+    // ==================== CAN transport ====================
+
+    private final CanBus bus;
+
     // ==================== Состояние (ключ — Node) ====================
 
-    /** Текущий "режим жесткости" для каждого мотора. ConcurrentHashMap — изменчива и потокобезопасна. */
+    /**
+     * Текущий "режим жесткости" для каждого мотора. ConcurrentHashMap — изменчива и потокобезопасна.
+     */
     private final ConcurrentHashMap<Node, MotorMode> currentModeMap = new ConcurrentHashMap<>();
 
-    /** Целевая позиция каждого двигателя (в тиках). ConcurrentHashMap для потокобезопасности. */
+    /**
+     * Целевая позиция каждого двигателя (в тиках). ConcurrentHashMap для потокобезопасности.
+     */
     private final ConcurrentHashMap<Node, AtomicInteger> targetPosMap = new ConcurrentHashMap<>();
-
-    /** Инициализация завершена (CAN-интерфейс открыт). ConcurrentHashMap для потокобезопасности. */
-    private final ConcurrentHashMap<Node, Boolean> isInitializedMap = new ConcurrentHashMap<>();
 
     // ==================== Конструктор ====================
 
     /**
-     * Конструктор. Инициализирует внутренние мапы для Node.STEPPER_1.
+     * Конструктор — принимает готовый транспортный слой.
+     *
+     * @param bus реализация CanBus (SocketCanBus, PcanBus, MockCanBus).
+     */
+    public CanController(CanBus bus) {
+        this.bus = bus;
+        Arrays
+                .stream(Node.values())
+                .forEach(node -> initMotor(node, MotorMode.LOCKED));
+    }
+
+    /**
+     * Конструктор без аргументов — создаёт заглушку-транспорт (для тестов).
      */
     public CanController() {
-        initMotor(Node.STEPPER_1, MotorMode.LOCKED);
+        this.bus = new CanBus() {
+            @Override
+            public void open(String iface) {
+            }
+
+            @Override
+            public void send(int cobId, byte[] data) {
+            }
+
+            @Override
+            public byte[] receive(int cobId, int timeoutMs) {
+                return new byte[]{0x4B, 0, 0, 0};
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        Arrays
+                .stream(Node.values())
+                .forEach(node -> initMotor(node, MotorMode.LOCKED));
     }
 
     /**
@@ -103,7 +120,6 @@ public class CanController implements AutoCloseable {
     private void initMotor(Node node, MotorMode mode) {
         currentModeMap.put(node, mode);
         targetPosMap.put(node, new AtomicInteger(0));
-        isInitializedMap.put(node, false);
     }
 
     // ==================== Инициализация ====================
@@ -117,8 +133,8 @@ public class CanController implements AutoCloseable {
         assert canInterface != null && !canInterface.isBlank() : "canInterface не может быть пустым";
         System.out.println("[CAN] Initializing on " + canInterface + "...");
 
+        bus.open(canInterface);
         Node node = Node.STEPPER_1;
-        isInitializedMap.put(node, true);
         setMode(node, MotorMode.LOCKED);
         enableMotor(node);
         waitStatus(node, StatusWord.OPERATION_ENABLED, 1000);
@@ -158,27 +174,30 @@ public class CanController implements AutoCloseable {
      * Byte 4-7: данные (LE)
      */
     private int sdoRead(Node node, int index, int subIndex) {
-        if (!isInitializedMap.getOrDefault(node, false)) {
-            System.out.printf("[CAN] SDO read skipped — node %d not initialized.%n", node.getNodeId());
-            return 0;
-        }
+        byte[] request = new byte[8];
+        request[0] = 0x40;  // SDO upload expedited
+        request[1] = (byte) (index & 0xFF);
+        request[2] = (byte) ((index >> 8) & 0xFF);
+        request[3] = (byte) subIndex;
 
-        byte[] frame = new byte[8];
-        frame[0] = 0x40;  // SDO upload expedited
-        frame[1] = (byte) (index & 0xFF);
-        frame[2] = (byte) ((index >> 8) & 0xFF);
-        frame[3] = (byte) subIndex;
-
-        sendCanFrame(0x600 + node.getNodeId(), frame);
+        bus.send(0x600 + node.getNodeId(), request);
         System.out.printf("[CAN] SDO read 0x%04X.%02X from node %d%n", index, subIndex, node.getNodeId());
 
-        // TODO: получить ответ по COB-ID 0x580 + NodeID
-        // int responseBits = ...;
-        // System.out.printf("[CAN] SDO read = 0x%08X%n", responseBits);
-        return 0;  // заглушка
+        byte[] response = bus.receive(0x580 + node.getNodeId(), 1000);
+        if (response != null && (response[0] & 0x4B) == 0x4B) {
+            ByteBuffer bb = ByteBuffer.wrap(response).order(ByteOrder.LITTLE_ENDIAN);
+            bb.position(4);
+            int data = bb.getInt();
+            System.out.printf("[CAN] SDO response = 0x%08X%n", data);
+            return data;
+        }
+        System.out.printf("[CAN] WARNING: SDO response timeout for node %d%n", node.getNodeId());
+        return 0;
     }
 
-    /** Считывает значение из Object Dictionary. */
+    /**
+     * Считывает значение из Object Dictionary.
+     */
     private int sdoRead(Node node, CanOD entry) {
         return sdoRead(node, entry.getIndex(), entry.getSubIndex());
     }
@@ -193,11 +212,6 @@ public class CanController implements AutoCloseable {
      * Byte 4-7: данные (Little-Endian)
      */
     private void sdoWrite(Node node, int index, int subIndex, int value) {
-        if (!isInitializedMap.getOrDefault(node, false)) {
-            System.out.printf("[CAN] SDO skipped — node %d not initialized.%n", node.getNodeId());
-            return;
-        }
-
         byte[] frame = new byte[8];
         frame[0] = 0x2B;
         frame[1] = (byte) (index & 0xFF);
@@ -208,7 +222,7 @@ public class CanController implements AutoCloseable {
         frame[6] = (byte) ((value >> 16) & 0xFF);
         frame[7] = (byte) ((value >> 24) & 0xFF);
 
-        sendCanFrame(0x600 + node.getNodeId(), frame);
+        bus.send(0x600 + node.getNodeId(), frame);
         System.out.printf("[CAN] SDO write %-29s = 0x%08X%n", CanOD.toHex(index, subIndex), value);
     }
 
@@ -221,15 +235,13 @@ public class CanController implements AutoCloseable {
      * Byte 4-7: Target Position (в тиках)
      */
     private void pdoWritePosition(Node node, int position) {
-        if (!isInitializedMap.getOrDefault(node, false)) return;
-
         byte[] frame = new byte[8];
         ByteBuffer bb = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN);
         bb.putShort(0, (short) ControlWord.ENABLE_FULL.getValue());
         bb.putShort(2, (short) 0);
         bb.putInt(4, position);
 
-        sendCanFrame(CanPDO.RPDO1.master2slave(node.getNodeId()), frame);
+        bus.send(CanPDO.RPDO1.master2slave(node.getNodeId()), frame);
     }
 
     /**
@@ -237,25 +249,23 @@ public class CanController implements AutoCloseable {
      * Формат тот же, но Byte 4-7 — Target Torque.
      */
     private void pdoWriteTorque(Node node, int torque) {
-        if (!isInitializedMap.getOrDefault(node, false)) return;
-
         byte[] frame = new byte[8];
         ByteBuffer bb = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN);
         bb.putShort(0, (short) ControlWord.ENABLE_FULL.getValue());
         bb.putShort(2, (short) 0);
         bb.putInt(4, torque);
 
-        sendCanFrame(CanPDO.RPDO1.master2slave(node.getNodeId()), frame);
+        bus.send(CanPDO.RPDO1.master2slave(node.getNodeId()), frame);
     }
 
     /**
-     * Отправка CAN-кадра (заглушка для реального интерфейса).
-     * <p>
-     * Linux: SocketCAN (AF_CAN socket, sendto())
-     * Windows: PCAN-Basic API или Vector CANlib через JNI
+     * Проверяет, что двигатель включен (Operation Enabled).
+     * Если нет — бросает RuntimeException. Используется в начале публичных методов.
      */
-    private void sendCanFrame(int cobId, byte[] data) {
-        // TODO: SocketCAN AF_CAN, or PCAN/Vector via JNI.
+    private void assertEnabled(Node node) {
+        if (!hasStatus(node, StatusWord.OPERATION_ENABLED)) {
+            throw new IllegalStateException("Node " + node + " is not Operation Enabled. Status: " + getStatusByCode(node));
+        }
     }
 
     // ==================== Публичный API ====================
@@ -297,7 +307,9 @@ public class CanController implements AutoCloseable {
         currentModeMap.put(node, mode);
     }
 
-    /** Быстрый перевод в ручной режим (обёртка для setMode(HAND)). */
+    /**
+     * Быстрый перевод в ручной режим (обёртка для setMode(HAND)).
+     */
     public void setHandMode(Node node) {
         setMode(node, MotorMode.HAND);
         System.out.println("[CAN] Hand mode: crank by hand freely.");
@@ -351,7 +363,9 @@ public class CanController implements AutoCloseable {
         pdoWritePosition(node, 0);
     }
 
-    /** Поворачивает двигатель к указанному углу (относительно нуля). */
+    /**
+     * Поворачивает двигатель к указанному углу (относительно нуля).
+     */
     public void turnToAbsoluteAngle(Node node, float degrees) {
         int ticks = degreesToTicks(degrees);
         targetPosMap.get(node).set(ticks);
@@ -359,7 +373,9 @@ public class CanController implements AutoCloseable {
         System.out.printf("[CAN] turnToAbs %.1f deg (node=%d, pos=%d ticks)%n", degrees, node.getNodeId(), ticks);
     }
 
-    /** Поворачивает двигатель на указанное смещение (относительно текущей позиции). */
+    /**
+     * Поворачивает двигатель на указанное смещение (относительно текущей позиции).
+     */
     public void turnRelative(Node node, float degrees) {
         int delta = degreesToTicks(degrees);
         targetPosMap.get(node).addAndGet(delta);
@@ -367,7 +383,9 @@ public class CanController implements AutoCloseable {
         System.out.printf("[CAN] turnRel %.1f deg (node=%d, pos=%d ticks)%n", degrees, node.getNodeId(), targetPosMap.get(node).get());
     }
 
-    /** Поворачивает двигатель к указанному углу (синоним turnToAbsoluteAngle). */
+    /**
+     * Поворачивает двигатель к указанному углу (синоним turnToAbsoluteAngle).
+     */
     public void setAbsolutePosition(Node node, float degrees) {
         int ticks = degreesToTicks(degrees);
         targetPosMap.get(node).set(ticks);
@@ -375,7 +393,9 @@ public class CanController implements AutoCloseable {
         System.out.printf("[CAN] setAbs %.1f deg (node=%d, pos=%d ticks)%n", degrees, node.getNodeId(), ticks);
     }
 
-    /** Аварийная остановка. Двигатель останавливается по максимальному замедлению. */
+    /**
+     * Аварийная остановка. Двигатель останавливается по максимальному замедлению.
+     */
     public void emergencyStop(Node node) {
         System.out.printf("[CAN] EMERGENCY STOP node %d!%n", node.getNodeId());
         sdoWrite(node, CanOD.CONTROL_WORD, ControlWord.QUICK_STOP.getValue());
@@ -383,12 +403,16 @@ public class CanController implements AutoCloseable {
 
     // ==================== Обратная связь ====================
 
-    /** Считывает Status Word (0x6041) для конкретного мотора. */
+    /**
+     * Считывает Status Word (0x6041) для конкретного мотора.
+     */
     public int getStatusWord(Node node) {
         return sdoRead(node, CanOD.STATUS_WORD.getIndex(), CanOD.STATUS_WORD.getSubIndex());
     }
 
-    /** Возвращает все установленные в Status Word флаги для мотора. */
+    /**
+     * Возвращает все установленные в Status Word флаги для мотора.
+     */
     public Set<StatusWord> getStatusByCode(Node node) {
         int sw = getStatusWord(node);
         return Arrays.stream(StatusWord.values())
@@ -396,12 +420,16 @@ public class CanController implements AutoCloseable {
                 .collect(Collectors.toSet());
     }
 
-    /** Проверяет, установлен ли конкретный статус. */
+    /**
+     * Проверяет, установлен ли конкретный статус.
+     */
     public boolean hasStatus(Node node, StatusWord status) {
         return status.isSet(getStatusWord(node));
     }
 
-    /** Проверяет, что хотя бы один из заданных статусов активен. */
+    /**
+     * Проверяет, что хотя бы один из заданных статусов активен.
+     */
     public boolean hasAnyStatus(Node node, Set<StatusWord> statuses) {
         return statuses.stream().anyMatch(s -> hasStatus(node, s));
     }
@@ -417,7 +445,10 @@ public class CanController implements AutoCloseable {
     private boolean waitStatus(Node node, StatusWord status, int timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
-            try { Thread.sleep(10); } catch (InterruptedException ignored) {}
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException ignored) {
+            }
             if (hasStatus(node, status)) return true;
         }
         System.out.printf("[CAN] WARNING: node %d %s not confirmed (timeout %dms)%n", node.getNodeId(), status.name(), timeoutMs);
@@ -430,7 +461,10 @@ public class CanController implements AutoCloseable {
     private boolean waitAnyStatus(Node node, Set<StatusWord> statuses, int timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
-            try { Thread.sleep(10); } catch (InterruptedException ignored) {}
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException ignored) {
+            }
             if (hasAnyStatus(node, statuses)) return true;
         }
         System.out.printf("[CAN] WARNING: node %d none of %s confirmed (timeout %dms)%n", node.getNodeId(), statuses, timeoutMs);
@@ -439,13 +473,17 @@ public class CanController implements AutoCloseable {
 
     // ==================== Внутренние методы ====================
 
-    /** Перевод "градусы → тики". 400 taps/rev → 0.9° на тик. Зависит от драйвера шаговика. */
+    /**
+     * Перевод "градусы → тики". 400 taps/rev → 0.9° на тик. Зависит от драйвера шаговика.
+     */
     private int degreesToTicks(float degrees) {
         int ticksPerRev = 400;
         return Math.round(degrees * ticksPerRev / 360.0f);
     }
 
-    /** Обратный перевод "тики → градусы". */
+    /**
+     * Обратный перевод "тики → градусы".
+     */
     private float ticksToDegrees(int ticks) {
         int ticksPerRev = 400;
         return ticks * 360.0f / ticksPerRev;
@@ -453,12 +491,16 @@ public class CanController implements AutoCloseable {
 
     // ==================== Getters ====================
 
-    /** Возвращает режим жесткости. */
+    /**
+     * Возвращает режим жесткости.
+     */
     public MotorMode getMode(Node node) {
         return currentModeMap.get(node);
     }
 
-    /** Возвращает текущую целевую позицию в тиках. */
+    /**
+     * Возвращает текущую целевую позицию в тиках.
+     */
     public int getTargetPosition(Node node) {
         return targetPosMap.get(node).get();
     }
@@ -468,7 +510,7 @@ public class CanController implements AutoCloseable {
         System.out.println("[CAN] Shutting down...");
         for (var node : Node.values()) {
             emergencyStop(node);
-            isInitializedMap.put(node, false);
         }
+        bus.close();
     }
 }
