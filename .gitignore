@@ -4,13 +4,7 @@ target/
 !**/src/test/**/target/
 
 ### IntelliJ IDEA ###
-.idea/modules.xml
-.idea/jarRepositories.xml
-.idea/compiler.xml
-.idea/libraries/
-*.iws
-*.iml
-*.ipr
+.idea/
 
 ### Eclipse ###
 .apt_generated
@@ -33,6 +27,12 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Maven shade (генерируется shade-плагином) ###
+dependency-reduced-pom.xml
+
+### JVM crash logs ###
+hs_err_pid*.log
 
 ### Mac OS ###
 .DS_Store

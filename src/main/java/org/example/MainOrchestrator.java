@@ -1,7 +1,8 @@
 package org.example;
 
 import org.example.can.CanController;
-import org.example.can.dictionary.Node;
+import org.example.can.transport.CanBus;
+import org.example.can.transport.CanBusFactory;
 import sensor_msgs.LaserScan;
 
 import java.util.List;
@@ -10,13 +11,13 @@ public class MainOrchestrator {
     public static void main(String[] args) throws InterruptedException {
         System.out.println("=== Main Orchestrator Started ===");
         TopicInterface ros = new TopicInterface("orchestrator_node");
-        CanController can = new CanController();
-        can.init("/dev/can0");
+        CanBus bus = CanBusFactory.forCurrentOS(); // транспорт под текущую ОС
+        CanController can = new CanController(bus);
+        can.init("/dev/can0"); // Инициализация с CAN-интерфейсом
 
         float angle = 0;
         int scanSteps = 36;
         int scansPerStep = 10;
-
 
 
         for (int i = 0; i < scanSteps; i++) {

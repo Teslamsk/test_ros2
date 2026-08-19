@@ -88,6 +88,10 @@ public class TopicInterface {
     }
 
     private PointCloud2 addSliceToCloud(PointCloud2 cloud, LaserScan slice, float angle) {
+        if (cloud == null) {
+            // Создаем заглушку для дебага
+            cloud = new PointCloud2();
+        }
         // TODO: Реальная математика: конвертация LaserScan в PointCloud2, поворот на angle, добавление к cloud
         System.out.println("[ROS] Added rotated slice at " + angle + " to /pointCloud");
         return cloud;

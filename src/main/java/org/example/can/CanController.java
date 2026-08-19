@@ -85,33 +85,6 @@ public class CanController implements AutoCloseable {
     }
 
     /**
-     * Конструктор без аргументов — создаёт заглушку-транспорт (для тестов).
-     */
-    public CanController() {
-        this.bus = new CanBus() {
-            @Override
-            public void open(String iface) {
-            }
-
-            @Override
-            public void send(int cobId, byte[] data) {
-            }
-
-            @Override
-            public byte[] receive(int cobId, int timeoutMs) {
-                return new byte[]{0x4B, 0, 0, 0};
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        Arrays
-                .stream(Node.values())
-                .forEach(node -> initMotor(node, MotorMode.LOCKED));
-    }
-
-    /**
      * Инициализирует новый мотор в системе.
      *
      * @param node Node мотора.
@@ -134,12 +107,15 @@ public class CanController implements AutoCloseable {
         System.out.println("[CAN] Initializing on " + canInterface + "...");
 
         bus.open(canInterface);
-        Node node = Node.STEPPER_1;
-        setMode(node, MotorMode.LOCKED);
-        enableMotor(node);
-        waitStatus(node, StatusWord.OPERATION_ENABLED, 1000);
+        Arrays.stream(Node.values()).forEach(node -> {
+            System.out.printf("[CAN] Node %d starting initialization.%n", node.getNodeId());
+            setMode(node, MotorMode.LOCKED);
+            enableMotor(node);
+            waitStatus(node, StatusWord.OPERATION_ENABLED, 1000);
+            System.out.printf("[CAN] Node %d initialized.%n", node.getNodeId());
+        });
+        System.out.println("[CAN] Succeed nitialized on " + canInterface);
 
-        System.out.printf("[CAN] Node %d initialized.%n", node.getNodeId());
     }
 
     // ==================== CANopen SDO / PDO ====================
@@ -170,7 +146,7 @@ public class CanController implements AutoCloseable {
      * Byte 4-7: 0 (не используется)
      * <p>
      * Ответ (приходит по COB-ID 0x580 + NodeID):
-     * Byte 0: 0x4B — ответ "вот тебе 4 байта"
+     * Byte 0: 0x43 — ответ "вот тебе 4 байта" (expedited upload, CiA 301)
      * Byte 4-7: данные (LE)
      */
     private int sdoRead(Node node, int index, int subIndex) {
@@ -184,7 +160,7 @@ public class CanController implements AutoCloseable {
         System.out.printf("[CAN] SDO read 0x%04X.%02X from node %d%n", index, subIndex, node.getNodeId());
 
         byte[] response = bus.receive(0x580 + node.getNodeId(), 1000);
-        if (response != null && (response[0] & 0x4B) == 0x4B) {
+        if (response != null && response[0] == 0x43) {
             ByteBuffer bb = ByteBuffer.wrap(response).order(ByteOrder.LITTLE_ENDIAN);
             bb.position(4);
             int data = bb.getInt();

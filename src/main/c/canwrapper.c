@@ -3,8 +3,9 @@
  *
  * Compile:
  *   Linux:  gcc -shared -fPIC -o libcanwrapper.so canwrapper.c
- *   macOS:  gcc -shared -fPIC -o libcanwrapper.dylib canwrapper.c
- *   Windows (MSYS2/MinGW):  gcc -shared -o canwrapper.dll canwrapper.c
+ *   Windows (MSYS2/MinGW):  gcc -shared -o canwrapper.dll canwrapper.c (stubs only, see _WIN32 branch)
+ *
+ * Note: requires a Linux kernel (AF_CAN, linux/can.h) — not portable to macOS.
  *
  * Place resulting .so/.dll in a directory on java.library.path,
  * e.g.  the working directory or /usr/lib/jni/.

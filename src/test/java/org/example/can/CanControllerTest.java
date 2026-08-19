@@ -11,7 +11,7 @@ class CanControllerTest {
 
     /**
      * 1. CanController accepts CanBus
-     * 2. MockCanBus queues a SDO response: 0x581 → 0x4B 0 0 0 0x1A 0 0 0 (response = 0x0000001A = 26)
+     * 2. MockCanBus queues a SDO response: 0x581 → 0x43 0 0 0 0x1A 0 0 0 (response = 0x0000001A = 26)
      * 3. CanController.sdoRead(0x6041) → bus.send(0x601, ...) → bus.receive(0x581) → value = 26
      */
     @Test
@@ -19,7 +19,7 @@ class CanControllerTest {
         MockCanBus mock = new MockCanBus();
         // Pre-queue the SDO response for 0x581 (SDO response from node 1)
         byte[] response = new byte[8];
-        response[0] = (byte) 0x4B; // command byte (SDO upload expedited)
+        response[0] = (byte) 0x43; // header byte (SDO expedited upload response, CiA 301)
         response[1] = 0; // high index
         response[2] = 0; // sub-index
         response[3] = 0; // reserved
