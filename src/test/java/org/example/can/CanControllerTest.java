@@ -32,7 +32,7 @@ class CanControllerTest {
 
         try (CanController ctrl = new CanController(mock)) {
             // Read Status Word (0x6041) from node 1
-            int status = ctrl.getStatusWord(org.example.can.dictionary.Node.STEPPER_1);
+            int status = ctrl.getStatusWord(org.example.can.dictionary.Node.ROTATE_LIDAR_Z);
             assertEquals(26, status);
         }
     }
@@ -45,7 +45,7 @@ class CanControllerTest {
         MockCanBus mock = new MockCanBus();
 
         try (CanController ctrl = new CanController(mock)) {
-            ctrl.setHandMode(org.example.can.dictionary.Node.STEPPER_1);
+            ctrl.setHandMode(org.example.can.dictionary.Node.ROTATE_LIDAR_Z);
 
             // After setHandMode, we expect at least 4 writes:
             // 1) SDO write Mode of Operation (0x601)

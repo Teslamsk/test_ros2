@@ -1,11 +1,15 @@
 package org.example;
 
+import builtin_interfaces.Time;
 import sensor_msgs.LaserScan;
 import sensor_msgs.PointCloud2;
+import sensor_msgs.PointField;
 import us.ihmc.jros2.ROS2Node;
 import us.ihmc.jros2.ROS2Publisher;
 import us.ihmc.jros2.ROS2Topic;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -22,6 +26,14 @@ public class TopicInterface {
     private AtomicReference<CountDownLatch> processingLatch = new AtomicReference<>(new CountDownLatch(1));
     private volatile PointCloud2 lastCloud;
     private volatile float currentAngle = 0;
+
+    private static final int POINT_STEP = 12; // x + y + z, каждый float32 (4 байта)
+
+    /**
+     * Накопленные точки облака в мировой системе координат: каждая — {x, y, z}.
+     * Заполняется по мере прихода слайсов с /processedScan.
+     */
+    private final List<float[]> cloudPoints = new ArrayList<>();
 
     public TopicInterface(String ns) {
         this.node = new ROS2Node(ns);
@@ -89,12 +101,70 @@ public class TopicInterface {
 
     private PointCloud2 addSliceToCloud(PointCloud2 cloud, LaserScan slice, float angle) {
         if (cloud == null) {
-            // Создаем заглушку для дебага
             cloud = new PointCloud2();
         }
-        // TODO: Реальная математика: конвертация LaserScan в PointCloud2, поворот на angle, добавление к cloud
-        System.out.println("[ROS] Added rotated slice at " + angle + " to /pointCloud");
+
+        // Поворот слайса на угол головки (окружность вокруг оси Z):
+        // "локальная" система лида́ра -> мировая.
+        float cosA = (float) Math.cos(Math.toRadians(angle));
+        float sinA = (float) Math.sin(Math.toRadians(angle));
+
+        float rangeMin = slice.getRangeMin();
+        float rangeMax = slice.getRangeMax();
+        int slicePoints = 0;
+        for (int i = 0; i < slice.getRanges().size(); i++) {
+            float r = slice.getRanges().get(i);
+            if (!Float.isFinite(r) || r <= 0f) {
+                continue; // нет возврата
+            }
+            if ((rangeMin > 0f && r < rangeMin) || (rangeMax > 0f && r > rangeMax)) {
+                continue; // вне доверенного диапазона сенсора
+            }
+
+            // Луч i: theta = angle_min + i * angle_increment (рад, против часовой, 0 = +x)
+            float theta = slice.getAngleMin() + i * slice.getAngleIncrement();
+            float x = r * (float) Math.cos(theta);
+            float y = r * (float) Math.sin(theta);
+
+            cloudPoints.add(new float[]{x * cosA - y * sinA, x * sinA + y * cosA, 0f});
+            slicePoints++;
+        }
+
+        ByteBuffer data = ByteBuffer.allocate(cloudPoints.size() * POINT_STEP).order(ByteOrder.LITTLE_ENDIAN);
+        for (float[] p : cloudPoints) {
+            data.putFloat(p[0]).putFloat(p[1]).putFloat(p[2]);
+        }
+
+        cloud.getFields().clear();
+        cloud.getFields().add(pointField("x", 0));
+        cloud.getFields().add(pointField("y", 4));
+        cloud.getFields().add(pointField("z", 8));
+        cloud.setHeight(1);
+        cloud.setWidth(cloudPoints.size());
+        cloud.setIsBigendian(false);
+        cloud.setPointStep(POINT_STEP);
+        cloud.setRowStep(POINT_STEP * cloudPoints.size());
+        cloud.getData().clear();
+        cloud.getData().addAll(data.array());
+        cloud.setIsDense(true);
+
+        cloud.getHeader().setFrameId("world");
+        Time stamp = slice.getHeader().getStamp();
+        cloud.getHeader().getStamp().setSec(stamp.getSec());
+        cloud.getHeader().getStamp().setNanosec(stamp.getNanosec());
+
+        System.out.printf("[ROS] Slice at %.1f deg: %d points added, cloud total %d%n",
+                angle, slicePoints, cloudPoints.size());
         return cloud;
+    }
+
+    private static PointField pointField(String name, int offset) {
+        PointField f = new PointField();
+        f.setName(name);
+        f.setOffset(offset);
+        f.setDatatype(PointField.FLOAT32);
+        f.setCount(1);
+        return f;
     }
 
     public static class LatchWrapper {

@@ -26,11 +26,11 @@ import java.util.stream.Collectors;
  * Типичный рабочий цикл:
  * <pre>
  * controller.init("/dev/can0");
- * controller.setHandMode(Node.STEPPER_1);
- * controller.setZero(Node.STEPPER_1);
- * controller.setMode(Node.STEPPER_1, MotorMode.LOCKED);
- * controller.turnToAbsoluteAngle(Node.STEPPER_1, 45f);
- * controller.emergencyStop(Node.STEPPER_1);
+ * controller.setHandMode(Node.ROTATE_LIDAR_Z);
+ * controller.setZero(Node.ROTATE_LIDAR_Z);
+ * controller.setMode(Node.ROTATE_LIDAR_Z, MotorMode.LOCKED);
+ * controller.turnToAbsoluteAngle(Node.ROTATE_LIDAR_Z, 45f);
+ * controller.emergencyStop(Node.ROTATE_LIDAR_Z);
  * </pre>
  */
 public class CanController implements AutoCloseable {
@@ -408,6 +408,15 @@ public class CanController implements AutoCloseable {
      */
     public boolean hasAnyStatus(Node node, Set<StatusWord> statuses) {
         return statuses.stream().anyMatch(s -> hasStatus(node, s));
+    }
+
+    /**
+     * Ждём, пока привод доберётся до целевой позиции (Target Reached, бит 13).
+     *
+     * @return true, если позиция достигнута в пределах таймаута.
+     */
+    public boolean awaitTargetReached(Node node, int timeoutMs) {
+        return waitStatus(node, StatusWord.TARGET_REACHED, timeoutMs);
     }
 
     /**
