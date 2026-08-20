@@ -4,8 +4,15 @@ import org.example.can.CanController;
 import org.example.can.dictionary.Node;
 import org.example.can.transport.CanBus;
 import org.example.can.transport.CanBusFactory;
+import org.example.export.XyzWriter;
 import sensor_msgs.LaserScan;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -39,8 +46,22 @@ public class MainOrchestrator {
         }
 
         System.out.println("=== 360 Scan Complete ===");
+        try {
+            exportCloud(ros.getCloudPoints());
+        } catch (IOException e) {
+            System.err.println("[MAIN] Cloud export failed: " + e);
+        }
         can.close();
         ros.close();
+    }
+
+    private static void exportCloud(List<float[]> points) throws IOException {
+        Path dir = Paths.get("scan_export");
+        Files.createDirectories(dir);
+        String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+        Path xyz = dir.resolve("scan_" + stamp + ".xyz");
+        XyzWriter.write(xyz, points);
+        System.out.println("[MAIN] Exported " + points.size() + " points -> " + xyz);
     }
 
     private static LaserScan mergeScans(List<LaserScan> scans) {

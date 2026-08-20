@@ -86,6 +86,15 @@ public class TopicInterface {
         return readyScans;
     }
 
+    /**
+     * Снапшот накопленных точек облака (копия, можно свободно копировать/экспортировать).
+     */
+    public List<float[]> getCloudPoints() {
+        synchronized (cloudPoints) {
+            return new ArrayList<>(cloudPoints);
+        }
+    }
+
     public LatchWrapper publishAndAwaitProcessed(LaserScan avgScan, float angle) {
         this.currentAngle = angle;
         CountDownLatch latch = new CountDownLatch(1);

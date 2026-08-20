@@ -36,3 +36,6 @@ hs_err_pid*.log
 
 ### Mac OS ###
 .DS_Store
+
+### Экспорт облаков (E57/XYZ из скан-сессии) ###
+scan_export/
