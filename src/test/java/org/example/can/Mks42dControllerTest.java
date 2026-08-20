@@ -44,7 +44,7 @@ class Mks42dControllerTest {
     }
 
     @Test
-    void statusRequestDuplicatesOpcodeAndParsesResponse() {
+    void statusRequestSendsSingleOpcodeAndParsesResponse() {
         MockCanBus mock = new MockCanBus();
         // Ответ на 0xF1: [F1, status=1 (stopped), crc] — по одному на каждый запрос
         mock.queue(1, resp(1, 0xF1, 1));
@@ -55,8 +55,8 @@ class Mks42dControllerTest {
             assertTrue(c.isStopped());
 
             List<MockCanBus.CanFrame> tx = mock.getTxLog();
-            // Запрос: [F1, F1, crc] — для чтения opcode дублируется; crc = 1+F1+F1 = 0xE3
-            assertArrayEquals(new byte[]{(byte) 0xF1, (byte) 0xF1, (byte) 0xE3}, tx.get(0).data);
+            // Запрос чтения: [F1, crc], crc = 1+F1 = 0xF2 (по мануалу 7.3: "01 30 31" — один байт команды)
+            assertArrayEquals(new byte[]{(byte) 0xF1, (byte) 0xF2}, tx.get(0).data);
         }
     }
 
@@ -94,7 +94,7 @@ class Mks42dControllerTest {
             assertArrayEquals(
                     new byte[]{(byte) 0xF5, 0x00, 0x14, 0x64, 0x00, 0x20, 0x00, (byte) 0x8E},
                     tx.get(0).data);
-            assertArrayEquals(new byte[]{(byte) 0xF1, (byte) 0xF1, (byte) 0xE3}, tx.get(1).data);
+            assertArrayEquals(new byte[]{(byte) 0xF1, (byte) 0xF2}, tx.get(1).data);
         }
     }
 
@@ -123,7 +123,8 @@ class Mks42dControllerTest {
             assertEquals(180.0, c.getAngle(), 1e-9);
 
             List<MockCanBus.CanFrame> tx = mock.getTxLog();
-            assertArrayEquals(new byte[]{0x31, 0x31, 0x63}, tx.get(0).data);
+            // Запрос чтения: [31, crc], crc = 1+31 = 0x32
+            assertArrayEquals(new byte[]{0x31, 0x32}, tx.get(0).data);
         }
     }
 
@@ -145,6 +146,22 @@ class Mks42dControllerTest {
 
         try (Mks42dController c = new Mks42dController(mock, 1, 20)) {
             assertNull(c.statusOrNull());
+        }
+    }
+
+    @Test
+    void setHomeParamsBuilds90Frame() {
+        MockCanBus mock = new MockCanBus();
+        mock.queue(1, resp(1, 0x90, 1));
+
+        try (Mks42dController c = new Mks42dController(mock)) {
+            c.setHomeParams(1, 0, 3000, true, 1); // trig=1, dir=0, speed=3000=0x0BB8, endLimit=1, hmMode=1
+
+            List<MockCanBus.CanFrame> tx = mock.getTxLog();
+            // crc = 1+90+01+00+0B+B8+01+01 = 0x57
+            assertArrayEquals(
+                    new byte[]{(byte) 0x90, 0x01, 0x00, 0x0B, (byte) 0xB8, 0x01, 0x01, (byte) 0x57},
+                    tx.get(0).data);
         }
     }
 

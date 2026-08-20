@@ -61,8 +61,10 @@ public class Mks42dController implements AutoCloseable {
     public static final byte OP_SET_HOME = (byte) 0x90;
     public static final byte OP_GO_HOME = (byte) 0x91;
     public static final byte OP_ZERO_AXIS = (byte) 0x92;
+    public static final byte OP_NO_LIMIT_HOME = (byte) 0x94;
     public static final byte OP_MODE0 = (byte) 0x9A;
     public static final byte OP_HOLDING_CURRENT = (byte) 0x9B;
+    public static final byte OP_POSITION_ERROR = (byte) 0x9D;
     public static final byte OP_LIMIT_PORT_REMAP = (byte) 0x9E;
     public static final byte OP_READ_STATUS = (byte) 0xF1;   // ответ: [F1, status, crc]
     public static final byte OP_ENABLE = (byte) 0xF3;        // [F3, 00|01, crc]
@@ -72,6 +74,7 @@ public class Mks42dController implements AutoCloseable {
     public static final byte OP_ABS_AXIS = (byte) 0xF5;      // [F5, spdHi(4b), spdLo, acc, abs(3B signed BE), crc]
     public static final byte OP_REL_PULSES = (byte) 0xFD;
     public static final byte OP_ABS_PULSES = (byte) 0xFE;
+    public static final byte OP_SAVE_CLEAN = (byte) 0xFF;    // [FF, C8=save | CA=clean, crc]
 
     // ==================== Константы ====================
 
@@ -128,8 +131,8 @@ public class Mks42dController implements AutoCloseable {
     }
 
     public Mks42dController(CanBus bus, int nodeId, long responseTimeoutMs) {
-        if (nodeId < 0x01 || nodeId > 0x0A) {
-            throw new IllegalArgumentException("MKS 42D: CAN ID должен быть 01..10, получен 0x" + Integer.toHexString(nodeId));
+        if (nodeId < 0x01 || nodeId > 0x7FF) {
+            throw new IllegalArgumentException("MKS 42D: CAN ID должен быть 01..0x7FF, получен 0x" + Integer.toHexString(nodeId));
         }
         this.bus = bus;
         this.nodeId = nodeId;
@@ -255,6 +258,8 @@ public class Mks42dController implements AutoCloseable {
 
     /**
      * Движение к углу без ожидания остановки.
+     * Привод поддерживает real-time update: во время движения можно отправить
+     * новую F5 (смена скорости/координаты).
      */
     public void turnToAbsoluteAngle(double degrees, int speedRpm, int accel) {
         long axis = degreesToAxis(degrees);
@@ -291,6 +296,13 @@ public class Mks42dController implements AutoCloseable {
         if (st == RUN_FAIL) {
             throw new IllegalStateException("MKS 42D: движение отклонено (status=0), op=0x" + toHex(op));
         }
+    }
+
+    /**
+     * Сохранение/очистка параметров speed-режима (команда 0xFF): save = C8, clean = CA.
+     */
+    public void saveCleanSpeedMode(boolean save) {
+        writeOk(OP_SAVE_CLEAN, save ? 0xC8 : 0xCA);
     }
 
     /**
@@ -369,14 +381,38 @@ public class Mks42dController implements AutoCloseable {
     }
 
     /**
-     * Параметры home (команда 0x90): уровень срабатывания концевика, направление,
-     * скорость (0..4095), включение ограничения концом.
+     * Параметры home (команда 0x90, 6 байт данных):
+     * уровень срабатывания концевика (0=Low, 1=High), направление (0=CW, 1=CCW),
+     * скорость (0..3000 RPM), включение ограничения концом, режим:
+     * hmMode = 0 — go home с концевиком, 1 — без концевика.
      */
-    public void setHomeParams(int trigLevel, int direction, int speed, boolean endLimit) {
-        if (speed < 0 || speed > 4095) {
-            throw new IllegalArgumentException("Home speed должен быть 0..4095, получен " + speed);
+    public void setHomeParams(int trigLevel, int direction, int speed, boolean endLimit, int hmMode) {
+        if (speed < 0 || speed > SPEED_LIMIT_RPM) {
+            throw new IllegalArgumentException("Home speed должен быть 0.." + SPEED_LIMIT_RPM + ", получен " + speed);
         }
-        writeOk(OP_SET_HOME, trigLevel, direction, (speed >> 8) & 0x0F, speed & 0xFF, endLimit ? 1 : 0);
+        writeOk(OP_SET_HOME, trigLevel, direction, (speed >> 8) & 0x0F, speed & 0xFF, endLimit ? 1 : 0, hmMode);
+    }
+
+    /**
+     * "noLimit" go home (команда 0x94): угол возврата (единицы оси: 0x4000 = 360°,
+     * 0x2000 = 180° — дефолт) и ток при возврате, мА.
+     */
+    public void setNoLimitHome(int angleUnits, int currentMa) {
+        writeOk(OP_NO_LIMIT_HOME,
+                (angleUnits >> 24) & 0xFF, (angleUnits >> 16) & 0xFF,
+                (angleUnits >> 8) & 0xFF, angleUnits & 0xFF,
+                (currentMa >> 8) & 0xFF, currentMa & 0xFF);
+    }
+
+    /**
+     * Защита по ошибке positions + En-триггер возврата в нуль (команда 0x9D):
+     * Tim — в единицах ~15 мс, Errors — 28000 ≈ 360°.
+     */
+    public void setPositionErrorProtection(boolean enTriggerZero, boolean posErrorProtect, int timeUnits, int errorUnits) {
+        int flags = (enTriggerZero ? 0x01 : 0x00) | (posErrorProtect ? 0x02 : 0x00);
+        writeOk(OP_POSITION_ERROR, flags,
+                (timeUnits >> 8) & 0xFF, timeUnits & 0xFF,
+                (errorUnits >> 8) & 0xFF, errorUnits & 0xFF);
     }
 
     /**
@@ -410,7 +446,7 @@ public class Mks42dController implements AutoCloseable {
      * @return статус, или null если привод не ответил.
      */
     public Integer statusOrNull() {
-        byte[] data = transact(OP_READ_STATUS, OP_READ_STATUS);
+        byte[] data = transact(OP_READ_STATUS);
         if (data == null) {
             return null;
         }
@@ -430,7 +466,7 @@ public class Mks42dController implements AutoCloseable {
      * Значение накопительное: может выходить за пределы одного оборота.
      */
     public long readEncoder() {
-        byte[] data = transact(OP_READ_ENCODER, OP_READ_ENCODER);
+        byte[] data = transact(OP_READ_ENCODER);
         if (data == null || data.length < 8) {
             throw new IllegalStateException("MKS 42D: нет ответа на чтение позиции (0x31)");
         }
@@ -455,11 +491,32 @@ public class Mks42dController implements AutoCloseable {
      * Текущая скорость, RPM (команда 0x32): CCW — положительная, CW — отрицательная.
      */
     public int readSpeed() {
-        byte[] data = transact(OP_READ_SPEED, OP_READ_SPEED);
+        byte[] data = transact(OP_READ_SPEED);
         if (data == null || data.length < 4) {
             throw new IllegalStateException("MKS 42D: нет ответа на чтение скорости (0x32)");
         }
         return (short) (((data[1] & 0xFF) << 8) | (data[2] & 0xFF));
+    }
+
+    /**
+     * Чтение системного параметра (команда 0x00): [00, code, crc], напр. code = 0x82 (work mode),
+     * 0x83 (current), 0x84 (mstep), 0x8B (can id).
+     * Ответ: [code, params..., crc], формат params — как при установке;
+     * если параметр не поддерживается: [code, FF, FF, crc].
+     *
+     * @return байты params, или null если нет ответа / параметр не читается.
+     */
+    public byte[] readSystemParameter(int code) {
+        byte[] data = transact(OP_READ_SYSTEM_PARAMS, code & 0xFF);
+        if (data == null) {
+            return null;
+        }
+        if (data.length == 4 && (data[1] & 0xFF) == 0xFF && (data[2] & 0xFF) == 0xFF) {
+            return null;
+        }
+        byte[] params = new byte[data.length - 3];
+        System.arraycopy(data, 1, params, 0, params.length);
+        return params;
     }
 
     // ==================== Конфигурация привода ====================
@@ -549,8 +606,8 @@ public class Mks42dController implements AutoCloseable {
      * продолжает пользоваться новым адресом.
      */
     public void setCanId(int newId) {
-        if (newId < 0x01 || newId > 0x0A) {
-            throw new IllegalArgumentException("MKS 42D: CAN ID должен быть 01..10, получен 0x" + Integer.toHexString(newId));
+        if (newId < 0x01 || newId > 0x7FF) {
+            throw new IllegalArgumentException("MKS 42D: CAN ID должен быть 01..0x7FF (0 — broadcast), получен 0x" + Integer.toHexString(newId));
         }
         writeOk(OP_CAN_ID, (newId >> 8) & 0x0F, newId & 0xFF);
         this.nodeId = newId;
