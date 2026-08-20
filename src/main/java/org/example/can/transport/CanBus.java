@@ -8,7 +8,7 @@ package org.example.can.transport;
  *   PcanBus      — Windows/Linux, PCAN-Basic DLL от Peak-System через JNA.
  *   MockCanBus   — заглушка для JUnit-тестов.
  *
- * CanController не зависит от вендора: принимает любой CanBus.
+ * Mks42dController не зависит от вендора: принимает любой CanBus.
  */
 public interface CanBus {
 
@@ -30,7 +30,7 @@ public interface CanBus {
     /**
      * Принимает CAN-фрейм с ожидаемым COB-ID (блокирующее чтение с таймаутом).
      *
-     * @param cobId     ожидаемый COB-ID (например, 0x580 + nodeId для SDO-ответа).
+     * @param cobId     ожидаемый COB-ID (для MKS 42D — адрес узла, напр. 0x01).
      * @param timeoutMs таймаут в миллисекундах.
      * @return byte[] (0–8 байт), или null если таймаут.
      */

@@ -1,17 +1,19 @@
 # Контекст для ассистента (test_ros2)
 
 ## Проект
-PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CANopen. Лидар D500 (LDROBOT STL-19P)
-вращается на шаговом/сервоприводе оси Z (CiA402, узел 1); из последовательных положений
-собирается облако точек; далее постобработка (мерж/меш/сечения) и передача инженеру в SolidWorks.
+PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDROBOT STL-19P)
+вращается на сервоприводе MKS SERVO42D_CAN оси Z (узлы 01, 500 kbit/s, собственный
+протокол привода поверх стандартных CAN-кадров; НЕ CANopen/CiA 402); из последовательных
+положений собирается облако точек; далее постобработка (мерж/меш/сечения) и передача
+инженеру в SolidWorks.
 
 ## Сборка и тесты
 - `mvn -o -q compile test` (offline; local repo `C:\Users\borodin\.m2`).
 - Консольный мусор `?????` — кодировка PowerShell, файлы UTF-8; не ошибка.
-- Тесты: JUnit 5 (surefire): CanControllerTest, E57WriterTest, XyzWriterTest.
+- Тесты: JUnit 5 (surefire): Mks42dControllerTest, E57WriterTest, XyzWriterTest.
 
 ## Текущее состояние (состояние на 2026-08-20)
-- `MainOrchestrator.java`: цикл `turnToAbsoluteAngle` → `awaitTargetReached` →
+- `MainOrchestrator.java`: цикл `turnToAbsoluteAngle` (0xF5 + waitIdle по 0xF1) →
   `collectScans(10)` → `mergeScans` (бакеты по углу, 10% фильтр выбросов) →
   `publishAndAwaitProcessed`; после цикла — экспорт облака в XYZ.
   ⚠️ Сейчас `scanSteps = 18`, `stepDeg = 180/scanSteps` → проход 180°, НЕ 360°
@@ -24,8 +26,11 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CANopen. Лидар D500 (LDROB
   в пайплайне пока НЕ используется.
 - `org.example.lidar` удалён 20.08 (TofbfParser/SpeedGovernor/PwmSink — не использовался
   пайплайном; при необходимости ToF-парсинг: кадр 47 байта 0x54 0x2C/0x9C, CRC8 по 46 байтам).
-- `org.example.can`: CiA402-контроллер (`CanController`), transports (PcanBus JNA,
-  SocketCanBus AF_CAN, MockCanBus), словарь CANopen.
+- `org.example.can`: `Mks42dController` — протокол MKS SERVO42D_CAN
+  (кадр `[op, args..., Check]`, Check = (CanID + сумма) & 0xFF, ось: 0x4000 = 360°;
+  команды: F7 стоп, 82 режим (для CAN нужен 3-5, SR_vFOC=5), 84 микрошаг, 83 ток,
+  F3 enable, 92 ноль, F5/F4 abs/rel ось, F6 скорость, F1 статус, 31/32 позиция/скорость);
+  transports (PcanBus JNA, SocketCanBus AF_CAN, MockCanBus).
 
 ## Ключевые факты D500
 - LDROBOT STL-19P, 40-pin: Tx / PWM (0–3.6 В) / GND / P5V.

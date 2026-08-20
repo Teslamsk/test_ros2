@@ -1,7 +1,6 @@
 package org.example;
 
-import org.example.can.CanController;
-import org.example.can.dictionary.Node;
+import org.example.can.Mks42dController;
 import org.example.can.transport.CanBus;
 import org.example.can.transport.CanBusFactory;
 import org.example.export.XyzWriter;
@@ -25,8 +24,8 @@ public class MainOrchestrator {
         System.out.println("=== Main Orchestrator Started ===");
         TopicInterface ros = new TopicInterface("orchestrator_node");
         CanBus bus = CanBusFactory.forCurrentOS(); // транспорт под текущую ОС
-        CanController can = new CanController(bus);
-        can.init("/dev/can0"); // Инициализация с CAN-интерфейсом
+        Mks42dController can = new Mks42dController(bus);
+        can.init("/dev/can0"); // шина CAN 2.0A + привід MKS 42D (node 01, 500 kbit/s)
 
         int scanSteps = 18;
         int scansPerStep = 10;
@@ -34,8 +33,10 @@ public class MainOrchestrator {
 
         for (int i = 0; i < scanSteps; i++) {
             float angle = i * stepDeg;
-            can.turnToAbsoluteAngle(Node.ROTATE_LIDAR_Z, angle);
-            can.awaitTargetReached(Node.ROTATE_LIDAR_Z, 5000);
+            boolean arrived = can.turnToAbsoluteAngle(angle);
+            if (!arrived) {
+                System.err.println("[MAIN] Motor did not stop at " + angle + " deg — checking status");
+            }
 
             List<LaserScan> rawScans = ros.collectScans(scansPerStep);
             System.out.println("[MAIN] Merging " + rawScans.size() + " scans for angle " + angle);
@@ -45,7 +46,7 @@ public class MainOrchestrator {
             System.out.println("[MAIN] Cloud updated at " + angle + " deg");
         }
 
-        System.out.println("=== 360 Scan Complete ===");
+        System.out.println("=== 180° Scan Complete ===");
         try {
             exportCloud(ros.getCloudPoints());
         } catch (IOException e) {

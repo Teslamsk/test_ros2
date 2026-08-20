@@ -9,9 +9,9 @@ import java.util.Deque;
  * Usage:
  * <pre>
  * MockCanBus mockBus = new MockCanBus();
- * mockBus.queue(0x581, new byte[]{0x43, 0, 0, 0, 0x1A, 0, 0, 0});
- * CanController ctrl = new CanController(mockBus);
- * // calls to sdoRead will drain the queue.
+ * mockBus.queue(0x01, new byte[]{(byte) 0xF1, 1, (byte) 0xF3}); // answer on 0xF1
+ * Mks42dController ctrl = new Mks42dController(mockBus);
+ * // calls to transact will drain the queue.
  * </pre>
  */
 public class MockCanBus implements CanBus {
