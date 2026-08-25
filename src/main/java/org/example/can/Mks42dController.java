@@ -507,16 +507,28 @@ public class Mks42dController implements AutoCloseable {
      * @return байты params, или null если нет ответа / параметр не читается.
      */
     public byte[] readSystemParameter(int code) {
-        byte[] data = transact(OP_READ_SYSTEM_PARAMS, code & 0xFF);
-        if (data == null) {
-            return null;
+        return readSystemParameter(code, responseTimeoutMs);
+    }
+
+    public byte[] readSystemParameter(int code, long timeoutMs) {
+        // Ответ на 0x00 начинается с КОДА ПАРАМЕТРА, а не с op 0x00 — поэтому
+        // transact() (ищет data[0] == op) тут годится только через собственный цикл.
+        bus.send(nodeId, buildFrame(OP_READ_SYSTEM_PARAMS, code & 0xFF));
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            byte[] data = bus.receive(nodeId, POLL_INTERVAL_MS);
+            if (data != null && data.length >= 3
+                    && (data[0] & 0xFF) == (code & 0xFF)
+                    && checksumOk(data)) {
+                if (data.length == 4 && (data[1] & 0xFF) == 0xFF && (data[2] & 0xFF) == 0xFF) {
+                    return null; // [code, FF, FF, crc] — параметр не поддерживается
+                }
+                byte[] params = new byte[data.length - 2];
+                System.arraycopy(data, 1, params, 0, params.length);
+                return params;
+            }
         }
-        if (data.length == 4 && (data[1] & 0xFF) == 0xFF && (data[2] & 0xFF) == 0xFF) {
-            return null;
-        }
-        byte[] params = new byte[data.length - 3];
-        System.arraycopy(data, 1, params, 0, params.length);
-        return params;
+        return null;
     }
 
     // ==================== Конфигурация привода ====================
@@ -554,6 +566,18 @@ public class Mks42dController implements AutoCloseable {
         }
         writeOk(OP_WORKING_CURRENT, (currentMa >> 8) & 0xFF, currentMa & 0xFF);
         System.out.println("[CAN] working current = " + currentMa + " mA");
+    }
+
+    /**
+     * Удерживающий ток, мА (0x9B) — ток, которым ротор удерживается на месте в останове.
+     * Ключевой параметр против проскальзывания/автоколебаний тяжёлой рамы при включении.
+     */
+    public void setHoldingCurrent(int currentMa) {
+        if (currentMa < 0 || currentMa > 5200) {
+            throw new IllegalArgumentException("Holding current должен быть 0..5200 мА, получен " + currentMa);
+        }
+        writeOk(OP_HOLDING_CURRENT, (currentMa >> 8) & 0xFF, currentMa & 0xFF);
+        System.out.println("[CAN] holding current = " + currentMa + " mA");
     }
 
     /**

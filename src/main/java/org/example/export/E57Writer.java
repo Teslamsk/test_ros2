@@ -140,10 +140,11 @@ public final class E57Writer {
         x.append("    <vectorChild type=\"Structure\">\n");
         x.append("      <guid type=\"String\"><![CDATA[{").append(UUID.randomUUID()).append("}]]></guid>\n");
         x.append("      <name type=\"String\"><![CDATA[Scan 0]]></name>\n");
-        x.append("      <description type=\"String\"><![CDATA[360 deg lidar merge]]></description>\n");
+        x.append("      <description type=\"String\"><![CDATA[pet-lidar merged point cloud (ros2-demo)]]></description>\n");
         x.append("      <indexBounds type=\"Structure\">\n");
         x.append("        <rowMinimum type=\"Integer\"/>\n");
-        x.append("        <rowMaximum type=\"Integer\">").append(n - 1).append("</rowMaximum>\n");
+        // Пустой вектор (n=0): пишем пустой элемент, а не -1
+        x.append("        <rowMaximum type=\"Integer\">").append(n > 0 ? n - 1 : "").append("</rowMaximum>\n");
         x.append("        <columnMinimum type=\"Integer\"/>\n");
         x.append("        <columnMaximum type=\"Integer\"/>\n");
         x.append("        <returnMinimum type=\"Integer\"/>\n");

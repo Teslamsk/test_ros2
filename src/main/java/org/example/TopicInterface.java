@@ -12,28 +12,37 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * ROS2-нод PET-пайплайна:
+ * - подписан на /scan (лидар), накапливает слайсы;
+ * - публикует мержнутый скан в /processedScan (для внешних ROS2-потребителей);
+ * - синхронно строит облако (в frame того же /scan) и публикует в /pointCloud.
+ *
+ * Модель потоков:
+ * - callback /scan (поток executor'а ROS) пишет в scanBuffer под scanLock;
+ * - облако строится в потоке вызывающего (publishAndProcess); cloudPoints
+ *   защищён cloudLock, снапшоты — через getCloudPoints().
+ *
+ * Раньше облако строилось в callback на echo собственного /processedScan:
+ * это было гонкой (callback прежнего угла мог сосчитать latch нового, потерянный
+ * echo = вечный ханг). Теперь обработка синхронная — гонок нет.
+ */
 public class TopicInterface {
     private final ROS2Node node;
     private final ROS2Publisher<LaserScan> pubProcessedScan;
     private final ROS2Publisher<PointCloud2> pubPointCloud;
 
+    /** Буфер /scan. Все доступы под scanLock. */
+    private final Object scanLock = new Object();
     private final List<LaserScan> scanBuffer = new ArrayList<>();
-    private CountDownLatch scanBufferLatch = new CountDownLatch(10);
 
-    private AtomicReference<CountDownLatch> processingLatch = new AtomicReference<>(new CountDownLatch(1));
-    private volatile PointCloud2 lastCloud;
-    private volatile float currentAngle = 0;
+    /** Точки облака в системе координат /scan (frame_id копируется из скана): {x, y, z}. Все доступы под cloudLock. */
+    private final Object cloudLock = new Object();
+    private final List<float[]> cloudPoints = new ArrayList<>();
 
     private static final int POINT_STEP = 12; // x + y + z, каждый float32 (4 байта)
-
-    /**
-     * Накопленные точки облака в мировой системе координат: каждая — {x, y, z}.
-     * Заполняется по мере прихода слайсов с /processedScan.
-     */
-    private final List<float[]> cloudPoints = new ArrayList<>();
+    private static final long SCAN_TIMEOUT_MS = 30_000;
 
     public TopicInterface(String ns) {
         this.node = new ROS2Node(ns);
@@ -41,7 +50,6 @@ public class TopicInterface {
         this.pubPointCloud = node.createPublisher(new ROS2Topic<PointCloud2>("/pointCloud", PointCloud2.class));
 
         startListeningToScan();
-        startListeningToProcessedScan();
     }
 
     private void startListeningToScan() {
@@ -49,78 +57,99 @@ public class TopicInterface {
                 new ROS2Topic<LaserScan>("/scan", LaserScan.class),
                 reader -> {
                     LaserScan scan = reader.read();
-                    synchronized (scanBuffer) {
+                    synchronized (scanLock) {
                         scanBuffer.add(scan);
+                        scanLock.notifyAll();
                     }
-                    scanBufferLatch.countDown();
                 }
         );
         System.out.println("[ROS] Subscribed to /scan");
     }
 
-    private void startListeningToProcessedScan() {
-        node.createSubscription(
-                new ROS2Topic<LaserScan>("/processedScan", LaserScan.class),
-                reader -> {
-                    LaserScan processedScan = reader.read();
-                    lastCloud = addSliceToCloud(lastCloud, processedScan, currentAngle);
-                    pubPointCloud.publish(lastCloud);
-                    processingLatch.get().countDown();
+    /**
+     * Ждёт `count` слайсов с /scan. Buffer очищается под тем же локом,
+     * поэтому первый слайс нового окна не может "уехать" в приём предыдущего.
+     *
+     * @throws InterruptedException  если поток прерван.
+     * @throws IllegalStateException если за SCAN_TIMEOUT_MS пришло меньше `count` слайсов.
+     */
+    public List<LaserScan> collectScans(int count) throws InterruptedException {
+        System.out.println("[ROS] Waiting for " + count + " scans from /scan...");
+        synchronized (scanLock) {
+            scanBuffer.clear();
+            long deadline = System.currentTimeMillis() + SCAN_TIMEOUT_MS;
+            while (scanBuffer.size() < count) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    throw new IllegalStateException(
+                            "[ROS] timeout: получено " + scanBuffer.size() + "/" + count
+                                    + " сканов за " + SCAN_TIMEOUT_MS + " ms (лидар молчит?)");
                 }
-        );
-        System.out.println("[ROS] Subscribed to /processedScan (async handler started)");
+                scanLock.wait(Math.min(remaining, 100));
+            }
+            return new ArrayList<>(scanBuffer);
+        }
     }
 
-    public List<LaserScan> collectScans(int count) throws InterruptedException {
-        synchronized (scanBuffer) {
-            scanBuffer.clear();
-        }
-        scanBufferLatch = new CountDownLatch(count);
-        System.out.println("[ROS] Waiting for " + count + " scans from /scan...");
-        scanBufferLatch.await();
-
-        List<LaserScan> readyScans;
-        synchronized (scanBuffer) {
-            readyScans = new ArrayList<>(scanBuffer);
-        }
-        return readyScans;
+    /**
+     * Публикует мержнутый скан в /processedScan, синхронно добавляет срез в облако
+     * и публикует обновлённый /pointCloud.
+     */
+    public void publishAndProcess(LaserScan avgScan, float angle) {
+        pubProcessedScan.publish(avgScan);
+        PointCloud2 cloud = addSliceToCloud(avgScan, angle);
+        pubPointCloud.publish(cloud);
+        System.out.println("[ROS] Published to /processedScan and /pointCloud (angle " + angle + ")");
     }
 
     /**
      * Снапшот накопленных точек облака (копия, можно свободно копировать/экспортировать).
      */
     public List<float[]> getCloudPoints() {
-        synchronized (cloudPoints) {
+        synchronized (cloudLock) {
             return new ArrayList<>(cloudPoints);
         }
-    }
-
-    public LatchWrapper publishAndAwaitProcessed(LaserScan avgScan, float angle) {
-        this.currentAngle = angle;
-        CountDownLatch latch = new CountDownLatch(1);
-        processingLatch.set(latch);
-        pubProcessedScan.publish(avgScan);
-        System.out.println("[ROS] Published to /processedScan (angle " + angle + "), waiting for async handler...");
-        return new LatchWrapper(latch);
     }
 
     public void close() {
         node.close();
     }
 
-    private PointCloud2 addSliceToCloud(PointCloud2 cloud, LaserScan slice, float angle) {
-        if (cloud == null) {
-            cloud = new PointCloud2();
-        }
+    /**
+     * Знак вертикали: +1 — луч 90° смотрит вверх, -1 — вниз.
+     * Если облако в RViz/CloudCompare оказалось перевернутым (верх/низ), поменяйте на -1.
+     */
+    static final float UP_SIGN = 1f;
 
-        // Поворот слайса на угол головки (окружность вокруг оси Z):
-        // "локальная" система лида́ра -> мировая.
-        float cosA = (float) Math.cos(Math.toRadians(angle));
-        float sinA = (float) Math.sin(Math.toRadians(angle));
+    /**
+     * Точка среза в мировых координатах. Круг луча лидара вертикален
+     * (перпендикулярен основанию), луч 0° горизонтален вдоль +X при нуле
+     * основания; основание повёрнуто на baseAngleDeg вокруг оси Z:
+     *   x = r·cos(θ)·cos(A), y = r·cos(θ)·sin(A), z = UP_SIGN·r·sin(θ).
+     * Срез лежит в вертикальной плоскости, содержащей ось Z — вращение
+     * основания даёт объём, а не плоскость XY.
+     */
+    static float[] toWorldPoint(float r, float theta, float baseAngleDeg) {
+        double a = Math.toRadians(baseAngleDeg);
+        float horiz = (float) (r * Math.cos(theta)); // радиальная (горизонтальная) составляющая
+        float vert = (float) (r * Math.sin(theta));  // вертикальная составляющая
+        return new float[]{
+                (float) (horiz * Math.cos(a)),
+                (float) (horiz * Math.sin(a)),
+                (float) (UP_SIGN * vert)
+        };
+    }
 
+    /**
+     * Поворачивает срез на угол основания (окружность вокруг оси Z):
+     * "локальная" система лидара -> мировая, и добавляет точки в облако.
+     * Вызывается синхронно из потока оркестратора.
+     */
+    private PointCloud2 addSliceToCloud(LaserScan slice, float angle) {
         float rangeMin = slice.getRangeMin();
         float rangeMax = slice.getRangeMax();
         int slicePoints = 0;
+        List<float[]> newPoints = new ArrayList<>();
         for (int i = 0; i < slice.getRanges().size(); i++) {
             float r = slice.getRanges().get(i);
             if (!Float.isFinite(r) || r <= 0f) {
@@ -130,17 +159,30 @@ public class TopicInterface {
                 continue; // вне доверенного диапазона сенсора
             }
 
-            // Луч i: theta = angle_min + i * angle_increment (рад, против часовой, 0 = +x)
+            // Луч i: θ = angle_min + i * angle_increment (рад, 0 = горизонт, вдоль +X)
             float theta = slice.getAngleMin() + i * slice.getAngleIncrement();
-            float x = r * (float) Math.cos(theta);
-            float y = r * (float) Math.sin(theta);
-
-            cloudPoints.add(new float[]{x * cosA - y * sinA, x * sinA + y * cosA, 0f});
+            newPoints.add(toWorldPoint(r, theta, angle));
             slicePoints++;
         }
 
-        ByteBuffer data = ByteBuffer.allocate(cloudPoints.size() * POINT_STEP).order(ByteOrder.LITTLE_ENDIAN);
-        for (float[] p : cloudPoints) {
+        synchronized (cloudLock) {
+            cloudPoints.addAll(newPoints);
+            PointCloud2 cloud = buildPointCloud(cloudPoints, slice);
+            System.out.printf("[ROS] Slice at %.1f deg: %d points added, cloud total %d%n",
+                    angle, slicePoints, cloudPoints.size());
+            return cloud;
+        }
+    }
+
+    /**
+     * Собирает PointCloud2 (3x FLOAT32, little-endian) из точек.
+     * Вызывается под cloudLock.
+     */
+    private static PointCloud2 buildPointCloud(List<float[]> points, LaserScan reference) {
+        PointCloud2 cloud = new PointCloud2();
+
+        ByteBuffer data = ByteBuffer.allocate(points.size() * POINT_STEP).order(ByteOrder.LITTLE_ENDIAN);
+        for (float[] p : points) {
             data.putFloat(p[0]).putFloat(p[1]).putFloat(p[2]);
         }
 
@@ -149,21 +191,21 @@ public class TopicInterface {
         cloud.getFields().add(pointField("y", 4));
         cloud.getFields().add(pointField("z", 8));
         cloud.setHeight(1);
-        cloud.setWidth(cloudPoints.size());
+        cloud.setWidth(points.size());
         cloud.setIsBigendian(false);
         cloud.setPointStep(POINT_STEP);
-        cloud.setRowStep(POINT_STEP * cloudPoints.size());
+        cloud.setRowStep(POINT_STEP * points.size());
         cloud.getData().clear();
         cloud.getData().addAll(data.array());
         cloud.setIsDense(true);
 
-        cloud.getHeader().setFrameId("world");
-        Time stamp = slice.getHeader().getStamp();
+        // Frame облака — как у приходящих /scan (у драйвера base_laser): в RViz не
+        // нужен TF, дисплей PointCloud2 в Fixed frame = это же frame видит данные.
+        cloud.getHeader().setFrameId(reference.getHeader().getFrameIdAsString());
+        Time stamp = reference.getHeader().getStamp();
         cloud.getHeader().getStamp().setSec(stamp.getSec());
         cloud.getHeader().getStamp().setNanosec(stamp.getNanosec());
 
-        System.out.printf("[ROS] Slice at %.1f deg: %d points added, cloud total %d%n",
-                angle, slicePoints, cloudPoints.size());
         return cloud;
     }
 
@@ -174,17 +216,5 @@ public class TopicInterface {
         f.setDatatype(PointField.FLOAT32);
         f.setCount(1);
         return f;
-    }
-
-    public static class LatchWrapper {
-        private final CountDownLatch latch;
-
-        public LatchWrapper(CountDownLatch latch) {
-            this.latch = latch;
-        }
-
-        public void await() throws InterruptedException {
-            latch.await();
-        }
     }
 }

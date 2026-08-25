@@ -29,6 +29,44 @@ class Mks42dControllerTest {
     }
 
     @Test
+    void readSystemParameterParsesResponseByParamCode() {
+        // Живой пример с шины: запрос [00, 83, 84], ответ [83, 06 40, CA] = 1600 мА.
+        // Ответ начинается с кода параметра, а не с 0x00.
+        MockCanBus mock = new MockCanBus();
+        mock.queue(1, resp(1, 0x83, 0x06, 0x40));
+
+        try (Mks42dController c = new Mks42dController(mock)) {
+            byte[] params = c.readSystemParameter(0x83);
+
+            assertNotNull(params);
+            assertEquals(2, params.length);
+            assertEquals(0x06, params[0] & 0xFF);
+            assertEquals(0x40, params[1] & 0xFF);
+            // запрос ушёл как [00, 83, crc]
+            assertArrayEquals(new byte[]{0x00, (byte) 0x83, (byte) 0x84}, mock.getTxLog().get(0).data);
+        }
+    }
+
+    @Test
+    void readSystemParameterUnsupportedReturnsNull() {
+        MockCanBus mock = new MockCanBus();
+        mock.queue(1, resp(1, 0x9E, 0xFF, 0xFF));
+
+        try (Mks42dController c = new Mks42dController(mock)) {
+            assertNull(c.readSystemParameter(0x9E));
+        }
+    }
+
+    @Test
+    void readSystemParameterTimeoutReturnsNull() {
+        MockCanBus mock = new MockCanBus();
+
+        try (Mks42dController c = new Mks42dController(mock)) {
+            assertNull(c.readSystemParameter(0x82));
+        }
+    }
+
+    @Test
     void enableSendsCorrectFrame() {
         MockCanBus mock = new MockCanBus();
         mock.queue(1, resp(1, 0xF3, 1));
@@ -161,6 +199,22 @@ class Mks42dControllerTest {
             // crc = 1+90+01+00+0B+B8+01+01 = 0x57
             assertArrayEquals(
                     new byte[]{(byte) 0x90, 0x01, 0x00, 0x0B, (byte) 0xB8, 0x01, 0x01, (byte) 0x57},
+                    tx.get(0).data);
+        }
+    }
+
+    @Test
+    void setHoldingCurrentBuilds9BFrame() {
+        MockCanBus mock = new MockCanBus();
+        mock.queue(1, resp(1, 0x9B, 1));
+
+        try (Mks42dController c = new Mks42dController(mock)) {
+            c.setHoldingCurrent(2000); // 2000 мА = 0x07D0
+
+            List<MockCanBus.CanFrame> tx = mock.getTxLog();
+            // crc = 1+9B+07+D0 = 0x73
+            assertArrayEquals(
+                    new byte[]{(byte) 0x9B, 0x07, (byte) 0xD0, (byte) 0x73},
                     tx.get(0).data);
         }
     }
