@@ -9,15 +9,20 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
 
 ## Сборка и тесты
 - `mvn -o -q compile test` (offline; local repo `C:\Users\borodin\.m2`).
-- SocketCanBus (Linux): `libcanwrapper.so` (Linux x86-64) ВШИТА в jar как ресурс В КОРНЕ
-  (`libcanwrapper.so`); загрузка штатным механизмом JNA — если библиотека не найдена в
-  library path, JNA сам извлекает ресурс в tmp. Пересборка .so (docker из Windows):
-  `docker run -v <src\main\c>:/src:ro -v <out>:/out gcc:latest gcc -shared -fPIC -Wall -O2 -o /out/libcanwrapper.so /src/canwrapper.c`.
+- SocketCanBus (Linux): `libcanwrapper-<arch>.so` ВШИТЫ в jar как ресурсы
+  (`/native/libcanwrapper-<arch>.so`), источники — `/canwrapper.c` в корне jar.
+  Загрузка: 1) штатный поиск JNA (library path/CWD/LD_LIBRARY_PATH — можно положить
+  локально собранный `libcanwrapper.so` рядом с jar), 2) встроенный ресурс по
+  `os.arch` (x86_64/amd64 → x86-64, aarch64/arm64 → aarch64) — извлечён в tmp,
+  загрузка по абсолютному пути. В jar есть ОБА арха (31.08: aarch64 добавлен —
+  малина работает без компиляции на месте). Пересборка .so (docker из Windows,
+  aarch64 через `--platform linux/arm64`):
+  `docker run --rm --platform linux/arm64 --mount type=bind,source=<src\main\resources>,target=/src,ro --mount type=bind,source=<out>,target=/out gcc:latest sh -c "gcc -shared -fPIC -Wall -O2 -o /out/libcanwrapper-aarch64.so /src/canwrapper.c"`.
   На Windows используется PcanBus.
 - Консольный мусор `?????` — кодировка PowerShell, файлы UTF-8; не ошибка.
-- Тесты: JUnit 5 (surefire): Mks42dControllerTest, ScanMergerTest, E57WriterTest, XyzWriterTest,
-  LiDARReaderTest, DxfWriterTest, SingleScanTest (standalone-путь лидара; без подключённого
-  устройства — skip через assumption, а не failure).
+- Тесты: JUnit 5 (surefire): Mks42dControllerTest, ScanMergerTest, SliceTransformTest,
+  E57WriterTest, XyzWriterTest, LiDARReaderTest, DxfWriterTest, SingleScanTest
+  (standalone-путь лидара; без подключённого устройства — skip через assumption, а не failure).
 
 ## Текущее состояние (состояние на 2026-08-20)
 - `MainOrchestrator.java`: цикл `turnToAbsoluteAngle` (0xF5 + waitIdle по 0xF1) →
@@ -27,21 +32,41 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
   реальный массив) →
   `publishAndProcess` (публикация /processedScan + синхронный срез в облако + /pointCloud,
    self-echo latch удалён — была гонка между углами); после цикла — экспорт облака в XYZ.
-   24.08: редукция мотор:рама = 2:1 (2 оборота мотора = 1 оборот рамы) —
-   `GEAR_RATIO = 2.0`: мотору задаётся `baseAngle * 2`, облако поворачивается на угол
-   РАМЫ; после прогона — возврат в нуль. Параметры прогона: `--sweep <° рамы>`
-   (деф. 90), `--step <°>` (деф. 10), `--scans <n>` (деф. 10), первый позиционный
-   аргумент — CAN-интерфейс (деф. `can0`).
+    24.08: редукция мотор:рама = 2:1; **26.08: перебрано на 4:1** (лёгкая рама,
+     автоколебаний нет) — `GEAR_RATIO = 4.0`: мотору задаётся `baseAngle * 4`
+     (90° рамы = 1 оборот мотора), облако поворачивается на угол РАМЫ; после
+      прогона — возврат в нуль. Параметры прогона: `--sweep <° рамы>`
+     (деф. 90), `--step <°>` (деф. 10, может быть 0.1), `--scans <n>` (деф. 10),
+     `--current <mA>` (рабочий ток 0x83), `--hold <mA>` (удерживающий 0x9B),
+     `--tilt <°>` (механический наклон луча 0° лидара от горизонтали, + = луч 0°
+     смотрит вверх; деф. 0 — калибровка: подгонять так, чтобы горизонтальные
+     линии в облаке были горизонтальны), первый позиционный аргумент —
+     CAN-интерфейс (деф. `can0`).
+    25.08: настройка привода — на стороне привода (стабильность — задача FOC-контура
+    серво, а не оркестратора): ход по умолчанию — профиль по дистанции от текущей
+    позиции в градусах МОТОРА (≤1° — 1 rpm/acc 5, ≤10° — 10/20, иначе 20/100 —
+    консервативно против торможения «в упор», с 4:1 шаг рамы маппится в 4× больше
+    градуса мотора, так что ступени сами масштабируются); оркестратор — просто
+    ход + waitIdle. Флаги `--current`/`--hold` — «сила» контура (у 42D нет
+    внешних Kp/Ki, FOC-контур внутренний).
 - `TopicInterface.java`: ROS2-нод; аккумулятор `cloudPoints` (List<float[]>),
   снапшот `getCloudPoints()`; PointCloud2 с 3×FLOAT32, point_step=12. frame_id облака
   копируется из /scan (21.08; раньше хардкод "world" — PointCloud2 в RViz было не видно
   из-за отсутствующего TF). Прикол: в s-generated классах jros2 getFrameId() возвращает
-  StringBuilder — читать через getFrameIdAsString(). 25.08: геометрия среза — круг
+  StringBuilder — читать через getFrameIdAsString(). 25.08: точка облака —
+  {x, y, z, intensity}, PointCloud2 4×FLOAT32, point_step=16; intensity берётся
+  из /scan (драйвер ldlidar_stl_ros2 заполняет intensities — видна гамма отражения
+  в RViz2, Color → "Intensity"). 25.08: фильтр `MIN_CLOUD_RANGE_M = 0.15` — точки
+  ближе 150 мм в облако не попадают (рама/основание лидара видна была на скане). 25.08: геометрия среза — круг
   луча лидара ВЕРТИКАЛЕН (⊥ основанию), луч 0° горизонтален вдоль +X при нуле
   основания; `toWorldPoint` маппит срез в вертикальную плоскость, содержащую ось Z
   (x = r·cosθ·cosA, y = r·cosθ·sinA, z = UP_SIGN·r·sinθ) — вращение вокруг Z даёт
-  объём, а не плоскость XY (раньше z=0 — все срезы складывались в одну плоскость).
-  Тест: `SliceTransformTest`. Если облако перевернуто по вертикали — `UP_SIGN = -1`.
+   объём, а не плоскость XY (раньше z=0 — все срезы складывались в одну плоскость).
+   Тест: `SliceTransformTest`. Если облако перевернуто по вертикали — `UP_SIGN = -1`.
+   31.08: калибровка `--tilt <°>` (наклон луча 0° от горизонтали, + = вверх) —
+   `toWorldPoint(r, θ, A, tiltRad)` считает высоту луча как θ + tilt; лидар установлен
+   с механическим наклоном <5°, подгоняется экспериментально по горизонтальным линиям
+   в облаке.
 - `org.example.export.XyzWriter`: экспорт `scan_export/scan_<yyyyMMdd_HHmmss>.xyz`
   (строка "x y z" на точку). `scan_export/` в `.gitignore`.
 - `org.example.export.E57Writer`: проверенный byte-level тестами E57 v1.0 writer,
@@ -69,7 +94,10 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
    0x9B удерживающий, 0x84 микрошаг, 0x82 режим (3/4/5), acc/скорость на ход, 0x80 калибровка.
 - `org.example.ScanMerger`: мерж сырых LaserScan — `mergeBucket(scans, factor, tol)`
   (бакет = шаг луча/factor, опора фильтра на медиану, +1e-2 eps против float-дрейфа
-  углов) и `mergeRaw(scans)` (без усреднения, сортировка по углу).
+  углов) и `mergeRaw(scans)` (без усреднения, сортировка по углу). 25.08: оба
+  несут интенсивность — бакет усредняет (r, intensity) парой в том же фильтре
+  выбросов, raw проносит за точкой; `pointIntensity` — fallback 0, если в скане
+  поле не заполнено.
 - `org.example.DebugScanMain`: отладка «лидар без мотора» для RViz2 — окна из N сканов
   /scan → /processedScan + накопленное /pointCloud, экспорт по Ctrl-C.
   Запуск: `mvn -o -q package`, затем
@@ -102,6 +130,11 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
 - XYZ/E57 не открывались в CloudCompare/SolidWorks вживую (только byte-level тесты).
 - 25.08: объёмное облако не проверено на железе — сверить вертикаль (UP_SIGN) и
   направление обхода основания с реальным прогоном в RViz/CloudCompare.
+- 26.08: автоколебания/сдвиг тяжёлой рамы — РЕШЕНО аппаратно: редукция 4:1
+  (`GEAR_RATIO = 4.0`) + облегчённая рама (аккумулятор под штатив, малина на
+  пауэрбанке — без силовых проводов в раме), автоколебаний больше нет. Осталось
+  проверить на реальном прогоне: объёмное облако (вертикаль UP_SIGN, направление
+  обхода) и что штатив/рама не видны (фильтр <150 мм в TopicInterface).
 - Параллельная задача по лидару формулируется в новой сессии (НЕ тот код, что был в `org.example.lidar` — он удалён как не нужный).
 - 20.08: USB-адаптер лидара не перечисливается системой (COM8 пропал, в системе только BT-COM) —
   SingleScanTest на этом пропущен. После переподключения: `mvn -o -q test -Dtest=SingleScanTest`,

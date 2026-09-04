@@ -4,6 +4,7 @@ import builtin_interfaces.Time;
 import sensor_msgs.LaserScan;
 import sensor_msgs.PointCloud2;
 import sensor_msgs.PointField;
+import us.ihmc.fastddsjava.cdr.idl.IDLFloatSequence;
 import us.ihmc.jros2.ROS2Node;
 import us.ihmc.jros2.ROS2Publisher;
 import us.ihmc.jros2.ROS2Topic;
@@ -37,14 +38,26 @@ public class TopicInterface {
     private final Object scanLock = new Object();
     private final List<LaserScan> scanBuffer = new ArrayList<>();
 
-    /** Точки облака в системе координат /scan (frame_id копируется из скана): {x, y, z}. Все доступы под cloudLock. */
+    /** Точки облака в системе координат /scan (frame_id копируется из скана): {x, y, z, intensity}. Все доступы под cloudLock. */
     private final Object cloudLock = new Object();
     private final List<float[]> cloudPoints = new ArrayList<>();
 
-    private static final int POINT_STEP = 12; // x + y + z, каждый float32 (4 байта)
+    private static final int POINT_STEP = 16; // x + y + z + intensity, каждый float32 (4 байта)
     private static final long SCAN_TIMEOUT_MS = 30_000;
 
+    /** Точки ближе этого (м) в облако не попадают: рама/основание лидара попадает в луч
+     *  на короткой дальности и видна на скане. */
+    static final float MIN_CLOUD_RANGE_M = 0.15f;
+
+    /** Механический наклон луча 0° лидара относительно горизонтали (рад): + — луч 0° смотрит вверх. */
+    private final float tiltRad;
+
     public TopicInterface(String ns) {
+        this(ns, 0f);
+    }
+
+    public TopicInterface(String ns, float tiltDeg) {
+        this.tiltRad = (float) Math.toRadians(tiltDeg);
         this.node = new ROS2Node(ns);
         this.pubProcessedScan = node.createPublisher(new ROS2Topic<LaserScan>("/processedScan", LaserScan.class));
         this.pubPointCloud = node.createPublisher(new ROS2Topic<PointCloud2>("/pointCloud", PointCloud2.class));
@@ -116,6 +129,20 @@ public class TopicInterface {
     }
 
     /**
+     * Точка для облака: валидный возврат, в доверенном диапазоне сенсора и не
+     * ближе MIN_CLOUD_RANGE_M (рама лидара в луче).
+     */
+    static boolean inCloudRange(float r, float rangeMin, float rangeMax) {
+        if (!Float.isFinite(r) || r <= 0f) {
+            return false; // нет возврата
+        }
+        if (r < MIN_CLOUD_RANGE_M) {
+            return false; // рама/основание — не сканируем
+        }
+        return (rangeMin <= 0f || r >= rangeMin) && (rangeMax <= 0f || r <= rangeMax); // доверенный диапазон
+    }
+
+    /**
      * Знак вертикали: +1 — луч 90° смотрит вверх, -1 — вниз.
      * Если облако в RViz/CloudCompare оказалось перевернутым (верх/низ), поменяйте на -1.
      */
@@ -130,9 +157,17 @@ public class TopicInterface {
      * основания даёт объём, а не плоскость XY.
      */
     static float[] toWorldPoint(float r, float theta, float baseAngleDeg) {
+        return toWorldPoint(r, theta, baseAngleDeg, 0f);
+    }
+
+    /**
+     * tiltRad — механический наклон луча 0° лидара относительно горизонтали
+     * (+ — луч 0° смотрит вверх): истинная высота луча с углом θ равна θ + tiltRad.
+     */
+    static float[] toWorldPoint(float r, float theta, float baseAngleDeg, float tiltRad) {
         double a = Math.toRadians(baseAngleDeg);
-        float horiz = (float) (r * Math.cos(theta)); // радиальная (горизонтальная) составляющая
-        float vert = (float) (r * Math.sin(theta));  // вертикальная составляющая
+        float horiz = (float) (r * Math.cos(theta + tiltRad)); // радиальная (горизонтальная) составляющая
+        float vert = (float) (r * Math.sin(theta + tiltRad));  // вертикальная составляющая
         return new float[]{
                 (float) (horiz * Math.cos(a)),
                 (float) (horiz * Math.sin(a)),
@@ -148,20 +183,21 @@ public class TopicInterface {
     private PointCloud2 addSliceToCloud(LaserScan slice, float angle) {
         float rangeMin = slice.getRangeMin();
         float rangeMax = slice.getRangeMax();
+        IDLFloatSequence intensities = slice.getIntensities();
         int slicePoints = 0;
         List<float[]> newPoints = new ArrayList<>();
         for (int i = 0; i < slice.getRanges().size(); i++) {
             float r = slice.getRanges().get(i);
-            if (!Float.isFinite(r) || r <= 0f) {
-                continue; // нет возврата
-            }
-            if ((rangeMin > 0f && r < rangeMin) || (rangeMax > 0f && r > rangeMax)) {
-                continue; // вне доверенного диапазона сенсора
+            if (!inCloudRange(r, rangeMin, rangeMax)) {
+                continue;
             }
 
             // Луч i: θ = angle_min + i * angle_increment (рад, 0 = горизонт, вдоль +X)
             float theta = slice.getAngleMin() + i * slice.getAngleIncrement();
-            newPoints.add(toWorldPoint(r, theta, angle));
+            float[] p = toWorldPoint(r, theta, angle, tiltRad);
+            // Интенсивность — прямо из /scan (в бакетах мержа уже усреднена).
+            float[] point = new float[]{p[0], p[1], p[2], ScanMerger.pointIntensity(intensities, i)};
+            newPoints.add(point);
             slicePoints++;
         }
 
@@ -175,7 +211,7 @@ public class TopicInterface {
     }
 
     /**
-     * Собирает PointCloud2 (3x FLOAT32, little-endian) из точек.
+     * Собирает PointCloud2 (x, y, z, intensity — 4× FLOAT32, little-endian) из точек.
      * Вызывается под cloudLock.
      */
     private static PointCloud2 buildPointCloud(List<float[]> points, LaserScan reference) {
@@ -183,13 +219,14 @@ public class TopicInterface {
 
         ByteBuffer data = ByteBuffer.allocate(points.size() * POINT_STEP).order(ByteOrder.LITTLE_ENDIAN);
         for (float[] p : points) {
-            data.putFloat(p[0]).putFloat(p[1]).putFloat(p[2]);
+            data.putFloat(p[0]).putFloat(p[1]).putFloat(p[2]).putFloat(p[3]);
         }
 
         cloud.getFields().clear();
         cloud.getFields().add(pointField("x", 0));
         cloud.getFields().add(pointField("y", 4));
         cloud.getFields().add(pointField("z", 8));
+        cloud.getFields().add(pointField("intensity", 12));
         cloud.setHeight(1);
         cloud.setWidth(points.size());
         cloud.setIsBigendian(false);

@@ -117,22 +117,53 @@ class Mks42dControllerTest {
     }
 
     @Test
-    void blockingTurnUsesDefaultsAndWaitsIdle() {
+    void blockingTurnUsesDistanceProfileAndWaitsIdle() {
         MockCanBus mock = new MockCanBus();
-        // дефолты: 20 rpm = 0x14, acc 100 = 0x64, axis 8192
-        mock.queue(1, resp(1, 0xF5, 1));   // движение принято
-        mock.queue(1, resp(1, 0xF1, 1));   // мотор остановился
+        // дефолт (профиль по дистанции): из 0° на 180° -> 20 rpm = 0x14, acc 100 = 0x64, axis 8192
+        mock.queue(1, resp(1, 0x31, 0, 0, 0, 0, 0, 0)); // текущая позиция: 0°
+        mock.queue(1, resp(1, 0xF5, 1));               // движение принято
+        mock.queue(1, resp(1, 0xF1, 1));               // мотор остановился
 
         try (Mks42dController c = new Mks42dController(mock)) {
             assertTrue(c.turnToAbsoluteAngle(180.0));
 
             List<MockCanBus.CanFrame> tx = mock.getTxLog();
-            assertEquals(2, tx.size());
+            assertEquals(3, tx.size());
             // axis 8192 = 0x00002000 → [00 20 00]; crc = 1+F5+00+14+64+20 = 0x8E
             assertArrayEquals(
                     new byte[]{(byte) 0xF5, 0x00, 0x14, 0x64, 0x00, 0x20, 0x00, (byte) 0x8E},
-                    tx.get(0).data);
-            assertArrayEquals(new byte[]{(byte) 0xF1, (byte) 0xF2}, tx.get(1).data);
+                    tx.get(1).data);
+            assertArrayEquals(new byte[]{(byte) 0xF1, (byte) 0xF2}, tx.get(2).data);
+        }
+    }
+
+    @Test
+    void microMoveProfileLowersSpeedAndAccel() {
+        // мелкие шаги — самая медленная скорость и минимальное ускорение
+        assertEquals(1, Mks42dController.speedForDistance(0.5));
+        assertEquals(5, Mks42dController.accelForDistance(0.5));
+        assertEquals(10, Mks42dController.speedForDistance(5.0));
+        assertEquals(20, Mks42dController.accelForDistance(5.0));
+        assertEquals(20, Mks42dController.speedForDistance(90.0));
+        assertEquals(100, Mks42dController.accelForDistance(90.0));
+    }
+
+    @Test
+    void defaultTurnUsesDistanceProfileFromCurrentPosition() {
+        MockCanBus mock = new MockCanBus();
+        mock.queue(1, resp(1, 0x31, 0, 0, 0, 0, 0x20, 0)); // текущая позиция: 180° (8192)
+        mock.queue(1, resp(1, 0xF5, 1));                   // ход на 181°: dist 1° -> 1 rpm, acc 5
+        mock.queue(1, resp(1, 0xF1, 1));                   // остановился
+
+        try (Mks42dController c = new Mks42dController(mock, 1, 10)) {
+            assertTrue(c.turnToAbsoluteAngle(181.0));
+
+            List<MockCanBus.CanFrame> tx = mock.getTxLog();
+            // F5: 1 rpm (0x0001), acc 5, axis 8238 = 0x202E
+            // crc = 1+F5+00+01+05+00+20+2E = 330 = 0x4A
+            assertArrayEquals(
+                    new byte[]{(byte) 0xF5, 0x00, 0x01, 0x05, 0x00, 0x20, 0x2E, 0x4A},
+                    tx.get(1).data);
         }
     }
 

@@ -25,6 +25,20 @@ class ScanMergerTest {
         return s;
     }
 
+    private static LaserScan scan(float angleMinDeg, float incDeg, float[] ranges, float[] intensities) {
+        LaserScan s = new LaserScan();
+        s.setAngleMin((float) Math.toRadians(angleMinDeg));
+        s.setAngleIncrement((float) Math.toRadians(incDeg));
+        s.setAngleMax((float) Math.toRadians(angleMinDeg + incDeg * (ranges.length - 1)));
+        s.setRangeMin(0f);
+        s.setRangeMax(100f);
+        for (int i = 0; i < ranges.length; i++) {
+            s.getRanges().add(ranges[i]);
+            s.getIntensities().add(intensities[i]);
+        }
+        return s;
+    }
+
     @Test
     void mergeBucketAveragesPhasedScans() {
         int beams = 36; // шаг 10°
@@ -45,6 +59,45 @@ class ScanMergerTest {
         assertEquals(0f, merged.getAngleMin(), 1e-6f);
         assertEquals((float) Math.toRadians(10f), merged.getAngleIncrement(), 1e-6f);
         assertEquals((float) Math.toRadians(350f), merged.getAngleMax(), 1e-6f);
+    }
+
+    @Test
+    void mergeBucketAveragesIntensityWithRange() {
+        int beams = 36; // шаг 10°
+        float[] a = new float[beams];
+        float[] b = new float[beams];
+        float[] ia = new float[beams];
+        float[] ib = new float[beams];
+        Arrays.fill(a, 1.0f);
+        Arrays.fill(b, 1.02f);
+        Arrays.fill(ia, 0.4f);
+        Arrays.fill(ib, 0.6f);
+        LaserScan s1 = scan(0f, 10f, a, ia);
+        LaserScan s2 = scan(5f, 10f, b, ib);
+
+        LaserScan merged = ScanMerger.mergeBucket(List.of(s1, s2), 1, 0.10f);
+
+        assertEquals(beams, merged.getIntensities().size());
+        for (float v : merged.getIntensities()) {
+            assertEquals(0.5f, v, 1e-4f); // усреднена в том же бакете, что и дальность
+        }
+    }
+
+    @Test
+    void mergeRawCarriesIntensitySortedByAngle() {
+        // сканы фазированы на 45°: общий порядок точек 0,45,90,... — интенсивности следуют за точками
+        LaserScan s1 = scan(0f, 90f,
+                new float[]{1f, 2f, 3f, 4f}, new float[]{0.1f, 0.2f, 0.3f, 0.4f});
+        LaserScan s2 = scan(45f, 90f,
+                new float[]{1f, 2f, 3f, 4f}, new float[]{0.5f, 0.6f, 0.7f, 0.8f});
+
+        LaserScan merged = ScanMerger.mergeRaw(List.of(s1, s2));
+
+        assertEquals(8, merged.getIntensities().size());
+        float[] expected = {0.1f, 0.5f, 0.2f, 0.6f, 0.3f, 0.7f, 0.4f, 0.8f};
+        for (int i = 0; i < expected.length; i++) {
+            assertEquals(expected[i], merged.getIntensities().get(i), 1e-6f);
+        }
     }
 
     @Test

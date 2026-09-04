@@ -1,6 +1,7 @@
 package org.example;
 
 import sensor_msgs.LaserScan;
+import us.ihmc.fastddsjava.cdr.idl.IDLFloatSequence;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -46,12 +47,15 @@ public final class ScanMerger {
         // друга, луч i в разных сканах — разные направления. Поэтому не усредняем
         // "по индексу", а суммируем точки по углу: бакет = 1/factor шага луча —
         // склеиваются только почти совпавшие направления.
-        List<List<Float>> cells = new ArrayList<>(buckets);
+        // Пара (дальность, интенсивность) на точку: интенсивность усредняется
+        // в том же бакете, что и дальность (после мержа индексы с сырыми не совпадают).
+        List<List<float[]>> cells = new ArrayList<>(buckets);
         for (int b = 0; b < buckets; b++) {
             cells.add(new ArrayList<>());
         }
 
         for (LaserScan scan : scans) {
+            IDLFloatSequence intensities = scan.getIntensities();
             for (int i = 0; i < scan.getRanges().size(); i++) {
                 float r = scan.getRanges().get(i);
                 if (!Float.isFinite(r) || r <= 0f) {
@@ -63,7 +67,7 @@ public final class ScanMerger {
                 // +eps: float-ошибка угла может чуть сдвинуть точку за границу бакета,
                 // у точки, лежащей РОВНО на границе (10i°), floor без eps упал бы влево.
                 int idx = (int) Math.floor(deg / bucketDeg + 1e-2) % buckets;
-                cells.get(idx).add(r);
+                cells.get(idx).add(new float[]{r, pointIntensity(intensities, i)});
             }
         }
 
@@ -75,34 +79,59 @@ public final class ScanMerger {
         result.setAngleMax((float) Math.toRadians((buckets - 1) * bucketDeg));
         result.setAngleIncrement((float) Math.toRadians(bucketDeg));
         result.getRanges().clear();
+        result.getIntensities().clear();
         for (int b = 0; b < buckets; b++) {
-            List<Float> points = cells.get(b);
+            List<float[]> points = cells.get(b);
             float value = NO_RETURN;
+            float intensity = NO_RETURN;
             if (!points.isEmpty()) {
                 // Опора на медиану, а не на среднее: один крупный выброс не тащит
                 // среднее и не вырезает весь бакет целиком.
-                double median = median(points);
-                List<Float> kept = points.stream()
-                        .filter(v -> Math.abs(v - median) <= outlierTolerance * Math.abs(median))
+                float median = median(points);
+                List<float[]> kept = points.stream()
+                        .filter(p -> Math.abs(p[0] - median) <= outlierTolerance * Math.abs(median))
                         .toList();
                 if (!kept.isEmpty()) {
-                    value = (float) kept.stream().mapToDouble(Float::doubleValue).average().orElse(NO_RETURN);
+                    double sumR = 0.0;
+                    double sumI = 0.0;
+                    for (float[] p : kept) {
+                        sumR += p[0];
+                        sumI += p[1];
+                    }
+                    value = (float) (sumR / kept.size());
+                    intensity = (float) (sumI / kept.size());
                 }
             }
             result.getRanges().add(value);
+            result.getIntensities().add(intensity);
         }
 
         return result;
     }
 
-    private static double median(List<Float> points) {
-        List<Float> sorted = new ArrayList<>(points);
+    /**
+     * Интенсивность i-й точки скана; если в скане интенсивности не заполнены
+     * (не все драйверы пишут это поле) — 0.
+     */
+    public static float pointIntensity(IDLFloatSequence intensities, int i) {
+        if (intensities == null || i >= intensities.size()) {
+            return 0f;
+        }
+        float v = intensities.get(i);
+        return Float.isFinite(v) ? v : 0f;
+    }
+
+    private static float median(List<float[]> points) {
+        List<Float> sorted = new ArrayList<>(points.size());
+        for (float[] p : points) {
+            sorted.add(p[0]);
+        }
         sorted.sort(Float::compare);
         int n = sorted.size();
         if (n % 2 == 1) {
             return sorted.get(n / 2);
         }
-        return (sorted.get(n / 2 - 1) + sorted.get(n / 2)) / 2.0;
+        return (float) ((sorted.get(n / 2 - 1) + sorted.get(n / 2)) / 2.0);
     }
 
     /**
@@ -115,11 +144,12 @@ public final class ScanMerger {
             return new LaserScan();
         }
 
-        record Beam(double deg, float range) {
+        record Beam(double deg, float range, float intensity) {
         }
 
         List<Beam> points = new ArrayList<>();
         for (LaserScan scan : scans) {
+            IDLFloatSequence intensities = scan.getIntensities();
             for (int i = 0; i < scan.getRanges().size(); i++) {
                 float r = scan.getRanges().get(i);
                 if (!Float.isFinite(r) || r <= 0f) {
@@ -127,7 +157,7 @@ public final class ScanMerger {
                 }
                 double deg = Math.toDegrees(scan.getAngleMin() + i * scan.getAngleIncrement());
                 deg = ((deg % 360.0) + 360.0) % 360.0;
-                points.add(new Beam(deg, r));
+                points.add(new Beam(deg, r, pointIntensity(intensities, i)));
             }
         }
         points.sort(Comparator.comparingDouble(Beam::deg));
@@ -135,6 +165,7 @@ public final class ScanMerger {
         LaserScan result = new LaserScan(scans.get(scans.size() - 1));
         int n = points.size();
         result.getRanges().clear();
+        result.getIntensities().clear();
         if (n == 0) {
             result.setAngleMin(0f);
             result.setAngleMax(0f);
@@ -143,6 +174,7 @@ public final class ScanMerger {
             float step = (float) (360.0 / n);
             for (Beam p : points) {
                 result.getRanges().add(p.range);
+                result.getIntensities().add(p.intensity);
             }
             result.setAngleMin((float) Math.toRadians(points.get(0).deg));
             result.setAngleMax(result.getAngleMin() + step * (n - 1));

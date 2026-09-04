@@ -247,12 +247,15 @@ public class Mks42dController implements AutoCloseable {
     // ==================== Управление движением ====================
 
     /**
-     * Движение к абсолютному углу (от нуля) в единицах оси, затем ожидание остановки.
+     * Движение к абсолютному углу, затем ожидание остановки.
+     * Профиль скорости/ускорения — по дистанции от текущей позиции
+     * (мелкие шаги медленнее: тяжёлая голова не должна тормозить "в упор").
      *
      * @return true, если мотор остановился в пределах таймаута.
      */
     public boolean turnToAbsoluteAngle(double degrees) {
-        turnToAbsoluteAngle(degrees, DEFAULT_SPEED_RPM, DEFAULT_ACCEL);
+        double dist = Math.abs(degrees - getAngle());
+        turnToAbsoluteAngle(degrees, speedForDistance(dist), accelForDistance(dist));
         return waitIdle(DEFAULT_MOVE_TIMEOUT_MS);
     }
 
@@ -265,6 +268,34 @@ public class Mks42dController implements AutoCloseable {
         long axis = degreesToAxis(degrees);
         runAxis(OP_ABS_AXIS, speedRpm, accel, axis);
         System.out.printf("[CAN] moveAbs %.2f deg -> axis %d (%d rpm, acc %d)%n", degrees, axis, speedRpm, accel);
+    }
+
+    /**
+     * Профиль скорости по дистанции хода: мелкие шаги — минимальная скорость
+     * и acc. Тяжёлая голова на подшипниках тормозит из 20 rpm в упор и впадает
+     * в автоколебания; на 1 rpm позиционный контур удерживает её легко.
+     */
+    static int speedForDistance(double distDeg) {
+        if (distDeg <= 1.0) {
+            return 1;
+        }
+        if (distDeg <= 10.0) {
+            return 10;
+        }
+        return DEFAULT_SPEED_RPM;
+    }
+
+    /**
+     * Профиль ускорения по дистанции хода (парно со speedForDistance).
+     */
+    static int accelForDistance(double distDeg) {
+        if (distDeg <= 1.0) {
+            return 5;
+        }
+        if (distDeg <= 10.0) {
+            return 20;
+        }
+        return DEFAULT_ACCEL;
     }
 
     /**
