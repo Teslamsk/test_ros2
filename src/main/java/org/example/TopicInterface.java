@@ -49,15 +49,30 @@ public class TopicInterface {
      *  на короткой дальности и видна на скане. */
     static final float MIN_CLOUD_RANGE_M = 0.15f;
 
+    /**
+     * Frame облака в свип-режиме: единая мировая система (не frame /scan).
+     * Угол рамы каждой точки уже "выпекается" в координаты, поэтому RViz
+     * дисплей PointCloud2 в Fixed frame = base показывает готовый объём без TF.
+     */
+    public static final String BASE_FRAME_ID = "base";
+
     /** Механический наклон луча 0° лидара относительно горизонтали (рад): + — луч 0° смотрит вверх. */
     private final float tiltRad;
 
+    /** Порог интенсивности ("confidence") 0..255: точки с intensity ниже порога в облако не попадают. 0 — фильтр выключен. */
+    private final float minIntensity;
+
     public TopicInterface(String ns) {
-        this(ns, 0f);
+        this(ns, 0f, 0f);
     }
 
     public TopicInterface(String ns, float tiltDeg) {
+        this(ns, tiltDeg, 0f);
+    }
+
+    public TopicInterface(String ns, float tiltDeg, float minIntensity) {
         this.tiltRad = (float) Math.toRadians(tiltDeg);
+        this.minIntensity = minIntensity;
         this.node = new ROS2Node(ns);
         this.pubProcessedScan = node.createPublisher(new ROS2Topic<LaserScan>("/processedScan", LaserScan.class));
         this.pubPointCloud = node.createPublisher(new ROS2Topic<PointCloud2>("/pointCloud", PointCloud2.class));
@@ -87,7 +102,9 @@ public class TopicInterface {
      * @throws IllegalStateException если за SCAN_TIMEOUT_MS пришло меньше `count` слайсов.
      */
     public List<LaserScan> collectScans(int count) throws InterruptedException {
-        System.out.println("[ROS] Waiting for " + count + " scans from /scan...");
+        if (count > 1) {
+            System.out.println("[ROS] Waiting for " + count + " scans from /scan...");
+        }
         synchronized (scanLock) {
             scanBuffer.clear();
             long deadline = System.currentTimeMillis() + SCAN_TIMEOUT_MS;
@@ -113,6 +130,108 @@ public class TopicInterface {
         PointCloud2 cloud = addSliceToCloud(avgScan, angle);
         pubPointCloud.publish(cloud);
         System.out.println("[ROS] Published to /processedScan and /pointCloud (angle " + angle + ")");
+    }
+
+    // ==================== Свип-режим ====================
+
+    /**
+     * Метка времени скана в ns (sec * 1e9 + nanosec) — эпоха wall-clock,
+     * совместимая с {@link EncoderTracker#wallNowNs()}.
+     */
+    public static long stampNs(LaserScan scan) {
+        Time t = scan.getHeader().getStamp();
+        return t.getSec() * 1_000_000_000L + t.getNanosec();
+    }
+
+    /**
+     * Точки одного среза для свипа: валидные по дальности (с ограничением
+     * maxRangeM), угол рамы каждой точки восстановлен по энкодеру на метку
+     * времени скана. Точки среза с прогрессом меньше tensionDeg отбрасываются
+     * целиком (эластичный ремень: первые градусы хода недостоверны).
+     *
+     * <p>Static, tiltRad не нужен: наклон луча применяется позже в
+     * {@link #worldPoint(SweepPoint)}.
+     *
+     * @param scan         срез лидара
+     * @param angleAt      источник угла рамы по wall-clock (ns)
+     * @param dirSign      +1 (CCW) / -1 (CW)
+     * @param tensionDeg   зона натяжения у старта, град (прогресс)
+     * @param maxRangeM    ограничение дальности, м (<= rangeMax сенсора)
+     * @param minIntensity порог интенсивности 0..255 (0 — фильтр выключен)
+     */
+    public static List<SweepPoint> sweepSlicePoints(LaserScan scan, FrameAngleSampler angleAt,
+                                                    int dirSign, double tensionDeg, double maxRangeM,
+                                                    float minIntensity) {
+        double frameAngle = angleAt.angleAt(stampNs(scan));
+        double progress = dirSign * frameAngle;
+        if (Double.isNaN(frameAngle) || progress < tensionDeg) {
+            return List.of();
+        }
+        float rangeMin = scan.getRangeMin();
+        float rangeMax = (float) Math.min(scan.getRangeMax(), maxRangeM);
+        IDLFloatSequence intensities = scan.getIntensities();
+        List<SweepPoint> out = new ArrayList<>(scan.getRanges().size());
+        for (int i = 0; i < scan.getRanges().size(); i++) {
+            float r = scan.getRanges().get(i);
+            if (!inCloudRange(r, rangeMin, rangeMax)) {
+                continue;
+            }
+            float intensity = ScanMerger.pointIntensity(intensities, i);
+            if (minIntensity > 0f && intensity < minIntensity) {
+                continue; // низкая confidence — отбрасываем
+            }
+            float theta = scan.getAngleMin() + i * scan.getAngleIncrement();
+            out.add(new SweepPoint(frameAngle, r, intensity, theta, i));
+        }
+        return out;
+    }
+
+    /**
+     * Мировая координата точки среза (система base): рама повёрнута на
+     * frameAngleDeg, наклон луча 0° = tiltRad. Интенсивность — у вызывающего.
+     */
+    public float[] worldPoint(SweepPoint p) {
+        return toWorldPoint(p.range(), p.thetaRad(), (float) p.frameAngleDeg(), tiltRad);
+    }
+
+    /**
+     * Публикует срез свипа (дельту) в /pointCloud и накапливает в облако.
+     * В RViz: Fixed frame = base, Display = Accumulate — объём растёт "на лету".
+     */
+    public void publishSweepSlice(List<SweepPoint> slice) {
+        if (slice == null || slice.isEmpty()) {
+            return;
+        }
+        List<float[]> newPoints = new ArrayList<>(slice.size());
+        for (SweepPoint p : slice) {
+            float[] w = worldPoint(p);
+            newPoints.add(new float[]{w[0], w[1], w[2], p.intensity()});
+        }
+        synchronized (cloudLock) {
+            cloudPoints.addAll(newPoints);
+        }
+        pubPointCloud.publish(buildPointCloud(newPoints, BASE_FRAME_ID, rosTimeNow()));
+    }
+
+    /**
+     * Публикует накопленное облако целиком в /pointCloud (финальный кадр свипа).
+     */
+    public void publishFullCloud() {
+        List<float[]> snapshot;
+        synchronized (cloudLock) {
+            snapshot = new ArrayList<>(cloudPoints);
+        }
+        pubPointCloud.publish(buildPointCloud(snapshot, BASE_FRAME_ID, rosTimeNow()));
+        System.out.println("[ROS] Published full cloud: " + snapshot.size() + " points");
+    }
+
+    /** Текущее wall-time как ROS Time (sec/nanosec, int). */
+    public static Time rosTimeNow() {
+        long now = System.currentTimeMillis();
+        Time t = new Time();
+        t.setSec((int) (now / 1000));
+        t.setNanosec((int) (now % 1000 * 1_000_000));
+        return t;
     }
 
     /**
@@ -191,12 +310,16 @@ public class TopicInterface {
             if (!inCloudRange(r, rangeMin, rangeMax)) {
                 continue;
             }
+            // Интенсивность — прямо из /scan (в бакетах мержа уже усреднена).
+            float intensity = ScanMerger.pointIntensity(intensities, i);
+            if (minIntensity > 0f && intensity < minIntensity) {
+                continue; // низкая confidence — отбрасываем
+            }
 
             // Луч i: θ = angle_min + i * angle_increment (рад, 0 = горизонт, вдоль +X)
             float theta = slice.getAngleMin() + i * slice.getAngleIncrement();
             float[] p = toWorldPoint(r, theta, angle, tiltRad);
-            // Интенсивность — прямо из /scan (в бакетах мержа уже усреднена).
-            float[] point = new float[]{p[0], p[1], p[2], ScanMerger.pointIntensity(intensities, i)};
+            float[] point = new float[]{p[0], p[1], p[2], intensity};
             newPoints.add(point);
             slicePoints++;
         }
@@ -215,6 +338,14 @@ public class TopicInterface {
      * Вызывается под cloudLock.
      */
     private static PointCloud2 buildPointCloud(List<float[]> points, LaserScan reference) {
+        return buildPointCloud(points, reference.getHeader().getFrameIdAsString(), reference.getHeader().getStamp());
+    }
+
+    /**
+     * Собирает PointCloud2 (x, y, z, intensity — 4× FLOAT32, little-endian) из точек
+     * в заданном frame с заданной меткой времени.
+     */
+    private static PointCloud2 buildPointCloud(List<float[]> points, String frameId, Time stamp) {
         PointCloud2 cloud = new PointCloud2();
 
         ByteBuffer data = ByteBuffer.allocate(points.size() * POINT_STEP).order(ByteOrder.LITTLE_ENDIAN);
@@ -236,10 +367,7 @@ public class TopicInterface {
         cloud.getData().addAll(data.array());
         cloud.setIsDense(true);
 
-        // Frame облака — как у приходящих /scan (у драйвера base_laser): в RViz не
-        // нужен TF, дисплей PointCloud2 в Fixed frame = это же frame видит данные.
-        cloud.getHeader().setFrameId(reference.getHeader().getFrameIdAsString());
-        Time stamp = reference.getHeader().getStamp();
+        cloud.getHeader().setFrameId(frameId);
         cloud.getHeader().getStamp().setSec(stamp.getSec());
         cloud.getHeader().getStamp().setNanosec(stamp.getNanosec());
 

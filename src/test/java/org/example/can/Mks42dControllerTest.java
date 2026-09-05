@@ -117,21 +117,24 @@ class Mks42dControllerTest {
     }
 
     @Test
-    void blockingTurnUsesDistanceProfileAndWaitsIdle() {
+    void blockingTurnUsesDistanceProfileAndWaitsSettled() {
         MockCanBus mock = new MockCanBus();
-        // дефолт (профиль по дистанции): из 0° на 180° -> 20 rpm = 0x14, acc 100 = 0x64, axis 8192
+        // дефолт (профиль по дистанции): из 0° на 180° -> 5 rpm = 0x05, acc 25 = 0x19, axis 8192
         mock.queue(1, resp(1, 0x31, 0, 0, 0, 0, 0, 0)); // текущая позиция: 0°
         mock.queue(1, resp(1, 0xF5, 1));               // движение принято
-        mock.queue(1, resp(1, 0xF1, 1));               // мотор остановился
+        // 6 опросов "остановлен" подряд — рама стабилизировалась (~100 мс)
+        for (int i = 0; i < 6; i++) {
+            mock.queue(1, resp(1, 0xF1, 1));
+        }
 
         try (Mks42dController c = new Mks42dController(mock)) {
             assertTrue(c.turnToAbsoluteAngle(180.0));
 
             List<MockCanBus.CanFrame> tx = mock.getTxLog();
-            assertEquals(3, tx.size());
-            // axis 8192 = 0x00002000 → [00 20 00]; crc = 1+F5+00+14+64+20 = 0x8E
+            assertEquals(8, tx.size());
+            // axis 8192 = 0x00002000 → [00 20 00]; crc = 1+F5+00+05+19+20 = 0x34
             assertArrayEquals(
-                    new byte[]{(byte) 0xF5, 0x00, 0x14, 0x64, 0x00, 0x20, 0x00, (byte) 0x8E},
+                    new byte[]{(byte) 0xF5, 0x00, 0x05, 0x19, 0x00, 0x20, 0x00, 0x34},
                     tx.get(1).data);
             assertArrayEquals(new byte[]{(byte) 0xF1, (byte) 0xF2}, tx.get(2).data);
         }
@@ -139,13 +142,15 @@ class Mks42dControllerTest {
 
     @Test
     void microMoveProfileLowersSpeedAndAccel() {
-        // мелкие шаги — самая медленная скорость и минимальное ускорение
+        // <= 1 deg — 1 rpm / acc 5
         assertEquals(1, Mks42dController.speedForDistance(0.5));
         assertEquals(5, Mks42dController.accelForDistance(0.5));
-        assertEquals(10, Mks42dController.speedForDistance(5.0));
-        assertEquals(20, Mks42dController.accelForDistance(5.0));
-        assertEquals(20, Mks42dController.speedForDistance(90.0));
-        assertEquals(100, Mks42dController.accelForDistance(90.0));
+        // <= 10 deg — 3 rpm / acc 8
+        assertEquals(3, Mks42dController.speedForDistance(5.0));
+        assertEquals(8, Mks42dController.accelForDistance(5.0));
+        // > 10 deg — пониженные дефолты 5 rpm / acc 25
+        assertEquals(5, Mks42dController.speedForDistance(90.0));
+        assertEquals(25, Mks42dController.accelForDistance(90.0));
     }
 
     @Test
@@ -153,7 +158,10 @@ class Mks42dControllerTest {
         MockCanBus mock = new MockCanBus();
         mock.queue(1, resp(1, 0x31, 0, 0, 0, 0, 0x20, 0)); // текущая позиция: 180° (8192)
         mock.queue(1, resp(1, 0xF5, 1));                   // ход на 181°: dist 1° -> 1 rpm, acc 5
-        mock.queue(1, resp(1, 0xF1, 1));                   // остановился
+        // 6 опросов "остановлен" подряд — рама стабилизировалась (~100 мс)
+        for (int i = 0; i < 6; i++) {
+            mock.queue(1, resp(1, 0xF1, 1));
+        }
 
         try (Mks42dController c = new Mks42dController(mock, 1, 10)) {
             assertTrue(c.turnToAbsoluteAngle(181.0));
@@ -205,6 +213,56 @@ class Mks42dControllerTest {
             long t0 = System.currentTimeMillis();
             assertFalse(c.waitIdle(60));
             assertTrue(System.currentTimeMillis() - t0 >= 50);
+        }
+    }
+
+    @Test
+    void waitSettledRequiresConsecutiveStoppedPolls() {
+        // Стоп, потом "полная скорость" (сброс счётчика), потом 6 стопов подряд
+        MockCanBus mock = new MockCanBus();
+        mock.queue(1, resp(1, 0xF1, 1));
+        mock.queue(1, resp(1, 0xF1, 4));
+        for (int i = 0; i < 6; i++) {
+            mock.queue(1, resp(1, 0xF1, 1));
+        }
+
+        try (Mks42dController c = new Mks42dController(mock, 1, 10)) {
+            assertTrue(c.waitSettled(10_000));
+        }
+    }
+
+    @Test
+    void waitSettledReturnsFalseWithoutStableStop() {
+        // 5 стопов подряд, дальше тишина — стабильных 6 нет
+        MockCanBus mock = new MockCanBus();
+        for (int i = 0; i < 5; i++) {
+            mock.queue(1, resp(1, 0xF1, 1));
+        }
+
+        try (Mks42dController c = new Mks42dController(mock, 1, 10)) {
+            assertFalse(c.waitSettled(200));
+        }
+    }
+
+    @Test
+    void tuneMotionCapsProfile() {
+        // Ограничители 2 rpm / acc 10 — профиль 180° (5/25) упирается в них
+        MockCanBus mock = new MockCanBus();
+        mock.queue(1, resp(1, 0x31, 0, 0, 0, 0, 0, 0));
+        mock.queue(1, resp(1, 0xF5, 1));
+        for (int i = 0; i < 6; i++) {
+            mock.queue(1, resp(1, 0xF1, 1));
+        }
+
+        try (Mks42dController c = new Mks42dController(mock)) {
+            c.tuneMotion(2, 10);
+            assertTrue(c.turnToAbsoluteAngle(180.0));
+
+            List<MockCanBus.CanFrame> tx = mock.getTxLog();
+            // 2 rpm, acc 10: crc = 1+F5+00+02+0A+00+20+00 = 0x22
+            assertArrayEquals(
+                    new byte[]{(byte) 0xF5, 0x00, 0x02, 0x0A, 0x00, 0x20, 0x00, 0x22},
+                    tx.get(1).data);
         }
     }
 

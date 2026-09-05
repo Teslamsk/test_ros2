@@ -22,9 +22,10 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
 - Консольный мусор `?????` — кодировка PowerShell, файлы UTF-8; не ошибка.
 - Тесты: JUnit 5 (surefire): Mks42dControllerTest, ScanMergerTest, SliceTransformTest,
   E57WriterTest, XyzWriterTest, LiDARReaderTest, DxfWriterTest, SingleScanTest
-  (standalone-путь лидара; без подключённого устройства — skip через assumption, а не failure).
+  (standalone-путь лидара; без подключённого устройства — skip через assumption, а не failure),
+  AngleBufferTest, EncoderTrackerTest, SweepAccumulatorTest, TopicSweepTest (05.09: sweep-режим).
 
-## Текущее состояние (состояние на 2026-08-20)
+## Текущее состояние (состояние на 2026-09-05)
 - `MainOrchestrator.java`: цикл `turnToAbsoluteAngle` (0xF5 + waitIdle по 0xF1) →
   `collectScans(10)` (wait/notify под scanLock, таймаут 30 c) →
   `ScanMerger.mergeBucket` (бакеты по углу от 0° лидара, фильтр выбросов по медиане,
@@ -38,10 +39,24 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
       прогона — возврат в нуль. Параметры прогона: `--sweep <° рамы>`
      (деф. 90), `--step <°>` (деф. 10, может быть 0.1), `--scans <n>` (деф. 10),
      `--current <mA>` (рабочий ток 0x83), `--hold <mA>` (удерживающий 0x9B),
-     `--tilt <°>` (механический наклон луча 0° лидара от горизонтали, + = луч 0°
-     смотрит вверх; деф. 0 — калибровка: подгонять так, чтобы горизонтальные
-     линии в облаке были горизонтальны), первый позиционный аргумент —
-     CAN-интерфейс (деф. `can0`).
+      `--tilt <°>` (механический наклон луча 0° лидара от горизонтали, + = луч 0°
+      смотрит вверх; деф. 0 — калибровка: подгонять так, чтобы горизонтальные
+      линии в облаке были горизонтальны), первый позиционный аргумент —
+      CAN-интерфейс (деф. `can0`).
+     04.09: фаза 1 качества (против радиальной "ребристости" от откатов привода
+     и эластичного ремня):
+      - ход теперь "ход + стабилизация": `waitSettled` — 6 опросов "остановлен"
+      подряд (~100 мс непрерывного стопа) до сканирования;
+      - профиль по дистанции понижен: ≤1° — 1/5, ≤10° — 3/8, иначе 5/25
+      (было 1/5, 10/20, 20/100) — против "перебега" и откатов ремня;
+      - флаги `--rpm N` / `--acc N` (0 = профиль) — ограничители скорости/ускорения
+      (`tuneMotion`), тюнинг привода без пересборки;
+      - Ctrl-C / завершение JVM: shutdown hook → `can.close()` (E-stop 0xF7 +
+      закрытие шины);
+      - мотор не остановился/не стабилизировался → прерывание прогона с экспортом
+      частичного облака (было: предупреждение + continue);
+      - валидация параметров с fail-fast и `--help` (неизвестный флаг больше
+      не трактуется как CAN-интерфейс).
     25.08: настройка привода — на стороне привода (стабильность — задача FOC-контура
     серво, а не оркестратора): ход по умолчанию — профиль по дистанции от текущей
     позиции в градусах МОТОРА (≤1° — 1 rpm/acc 5, ≤10° — 10/20, иначе 20/100 —
@@ -49,6 +64,41 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
     градуса мотора, так что ступени сами масштабируются); оркестратор — просто
     ход + waitIdle. Флаги `--current`/`--hold` — «сила» контура (у 42D нет
     внешних Kp/Ki, FOC-контур внутренний).
+   05.09: фаза 2 (sweep-режим) + фаза 3 (min-confidence, calibrate):
+   - `--mode sweep` (деф. `step`): рама идёт НЕПРЕРЫВНО с `--rpm` (speedMove, без
+     стопов/удержаний), сканы читаются с `/scan` на частоте сенсора; точки
+     накапливаются в cloud по угловым бинам через `SweepAccumulator` (скользящее
+     окно `--window` (деф. 0.2°)). Убирает "ребристость" от step-and-hold.
+   - `--tension <°>` (деф. 2.0) — зона натяжения ремня у старта: точки с
+     progress < tension отбрасываются.
+   - `--cw`/`--ccw` — направление (деф. CW); progress всегда положительный:
+     `dirSign = cw ? -1 : +1`, `progress = dirSign * (angle - start)`.
+   - `--merge N` (1..32) — сканов /scan на срез; `--max-range M` (деф. 3.0) —
+     ограничение дальности сенсора.
+   - `--min-confidence N` (0..255, деф. 0 = выкл) — точки с интенсивностью ниже
+     порога не попадают в облако (и step-, и sweep-путь).
+   - `--calibrate` (только sweep) — диагностика движения без облака/XYZ
+     (`runCalibrate`): число сэмплов, медианный/максимальный период, зависания
+     (>150 мс), измеренная скорость vs заданная, разгон (до 90% скорости),
+     рекомендуемый `--tension`, суммарный progress.
+   - XYZ-экспорт стримингом (`XyzWriter.Stream`) + shutdown hook (`xyzOut`) —
+     на Ctrl-C частичное облако пишется в `sweep_*.xyz`.
+   - новые классы (05.09): `AngleBuffer` (ring-буфер (ts ns, угол °), интерполяция
+     binary search, edge-клемпинг и гэпы ≤ maxGap), `EncoderTracker` (daemon-поток
+     опроса угла, буфер 8192), `SweepPoint` (record), `FrameAngleSampler`
+     (функциональный `angleAt(ns)`), `SweepAccumulator` (скользящее окно + merge по
+     бинам через `ScanMerger.filterAverage`).
+   - `TopicInterface`: `sweepSlicePoints(scan, angleAt, dirSign, tensionDeg,
+     maxRangeM, minIntensity)` (static, юнит-тестируемый), `publishSweepSlice`,
+     конструктор `TopicInterface(ns, tiltDeg, minIntensity)`.
+   - `Mks42dController.transact/readSystemParameter` — `synchronized` (CAN с poll-
+     потока и main-потока). `ScanMerger.filterAverage(points, tol)` — вынесен из
+     `mergeBucket`.
+   - тесты: AngleBufferTest (5), EncoderTrackerTest (2), SweepAccumulatorTest (3),
+     TopicSweepTest (5).
+   - JDK 17 грабли: `AtomicDouble` отсутствует (брать `AtomicReference<Double>`),
+     JUnit 5.9.3 без `assertDoubleNaN` (брать `assertTrue(Double.isNaN(x))`),
+     fastddsjava `IDLFloatSequence` без `set(int,float)` (только add/get/size).
 - `TopicInterface.java`: ROS2-нод; аккумулятор `cloudPoints` (List<float[]>),
   снапшот `getCloudPoints()`; PointCloud2 с 3×FLOAT32, point_step=12. frame_id облака
   копируется из /scan (21.08; раньше хардкод "world" — PointCloud2 в RViz было не видно
@@ -68,7 +118,9 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
    с механическим наклоном <5°, подгоняется экспериментально по горизонтальным линиям
    в облаке.
 - `org.example.export.XyzWriter`: экспорт `scan_export/scan_<yyyyMMdd_HHmmss>.xyz`
-  (строка "x y z" на точку). `scan_export/` в `.gitignore`.
+  (строка "x y z" на точку). `scan_export/` в `.gitignore`. 05.09: `XyzWriter.Stream`
+  (open → writePoint → close, `count()`) — стриминговый экспорт для sweep (частичное
+  облако по Ctrl-C через shutdown hook).
 - `org.example.export.E57Writer`: проверенный byte-level тестами E57 v1.0 writer,
   в пайплайне пока НЕ используется.
 - `org.example.lidar` удалён 20.08 (TofbfParser/SpeedGovernor/PwmSink — не использовался
@@ -127,6 +179,15 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
   STL-серия DTOF: LD06/LD19/STL-27L; только читает поток).
 
 ## Незакрытые
+- 04.09: радиальная "ребристость" облака (коррекции CAN-контроллера + эластичность
+  ремня) — софтверные меры применены (профиль 5/25, settle ~0,1 c, `--rpm`/`--acc`);
+  05.09: дополнительно — sweep-режим (непрерывное вращение) как основная мера.
+  Проверить реальным прогоном: если ребристость осталась — снижать `--rpm`/`--acc`
+  или перейти на `--mode sweep`.
+- 05.09: sweep-режим (фаза 2) + `--min-confidence`/`--calibrate` (фаза 3) проверены
+  только юнит-тестами — проверить на железе: качество sweep-облака (ребристость),
+  отчёт calibrate (скорость, разгон, рекомендуемый tension) и что стриминговый XYZ
+  (`sweep_*.xyz`) открывается в CloudCompare.
 - XYZ/E57 не открывались в CloudCompare/SolidWorks вживую (только byte-level тесты).
 - 25.08: объёмное облако не проверено на железе — сверить вертикаль (UP_SIGN) и
   направление обхода основания с реальным прогоном в RViz/CloudCompare.

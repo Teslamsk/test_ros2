@@ -31,4 +31,17 @@ class XyzWriterTest {
         XyzWriter.write(file, List.of());
         assertEquals(0, Files.size(file));
     }
+
+    @Test
+    void streamWritesPointsIncrementally() throws Exception {
+        Path file = Files.createTempFile("xyzstream", ".xyz");
+        try (XyzWriter.Stream s = XyzWriter.open(file)) {
+            s.writePoint(new float[]{1.0f, 2.0f, 3.0f});
+            assertEquals(1, s.count());
+            s.writePoint(new float[]{4.0f, 5.0f, 6.0f});
+            assertEquals(2, s.count());
+        }
+        String content = Files.readString(file, StandardCharsets.UTF_8);
+        assertEquals("1.0 2.0 3.0\n4.0 5.0 6.0\n", content);
+    }
 }

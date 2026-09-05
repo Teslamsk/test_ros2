@@ -81,29 +81,9 @@ public final class ScanMerger {
         result.getRanges().clear();
         result.getIntensities().clear();
         for (int b = 0; b < buckets; b++) {
-            List<float[]> points = cells.get(b);
-            float value = NO_RETURN;
-            float intensity = NO_RETURN;
-            if (!points.isEmpty()) {
-                // Опора на медиану, а не на среднее: один крупный выброс не тащит
-                // среднее и не вырезает весь бакет целиком.
-                float median = median(points);
-                List<float[]> kept = points.stream()
-                        .filter(p -> Math.abs(p[0] - median) <= outlierTolerance * Math.abs(median))
-                        .toList();
-                if (!kept.isEmpty()) {
-                    double sumR = 0.0;
-                    double sumI = 0.0;
-                    for (float[] p : kept) {
-                        sumR += p[0];
-                        sumI += p[1];
-                    }
-                    value = (float) (sumR / kept.size());
-                    intensity = (float) (sumI / kept.size());
-                }
-            }
-            result.getRanges().add(value);
-            result.getIntensities().add(intensity);
+            float[] av = filterAverage(cells.get(b), outlierTolerance);
+            result.getRanges().add(av[0]);
+            result.getIntensities().add(av[1]);
         }
 
         return result;
@@ -119,6 +99,36 @@ public final class ScanMerger {
         }
         float v = intensities.get(i);
         return Float.isFinite(v) ? v : 0f;
+    }
+
+    /**
+     * Усреднение пары (дальность, интенсивность) с отсечкой выбросов по медиане:
+     * опорой служит медиана дальностей (один крупный выброс не тащит среднее и
+     * не вырезает весь бакет целиком), затем усредняются оставшиеся точки.
+     *
+     * @return {@code {value, intensity}}, либо {@code {NaN, NaN}} если точек нет
+     *         или все вырезаны фильтром.
+     */
+    public static float[] filterAverage(List<float[]> points, float outlierTolerance) {
+        float value = NO_RETURN;
+        float intensity = NO_RETURN;
+        if (points != null && !points.isEmpty()) {
+            float median = median(points);
+            List<float[]> kept = points.stream()
+                    .filter(p -> Math.abs(p[0] - median) <= outlierTolerance * Math.abs(median))
+                    .toList();
+            if (!kept.isEmpty()) {
+                double sumR = 0.0;
+                double sumI = 0.0;
+                for (float[] p : kept) {
+                    sumR += p[0];
+                    sumI += p[1];
+                }
+                value = (float) (sumR / kept.size());
+                intensity = (float) (sumI / kept.size());
+            }
+        }
+        return new float[]{value, intensity};
     }
 
     private static float median(List<float[]> points) {

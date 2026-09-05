@@ -113,14 +113,28 @@ public class Mks42dController implements AutoCloseable {
     private static final int DEFAULT_MOVE_TIMEOUT_MS = 15000;
     private static final int HOME_TIMEOUT_MS = 20000;
     private static final int CALIBRATION_TIMEOUT_MS = 30000;
-    private static final int DEFAULT_SPEED_RPM = 20;
-    private static final int DEFAULT_ACCEL = 100;
+    /**
+     * Дефолтные скорость/ускорение — пониженный профиль против "перебега"
+     * и откатов эластичного ремня (радиальная "ребристость" облака).
+     */
+    private static final int DEFAULT_SPEED_RPM = 5;
+    private static final int DEFAULT_ACCEL = 25;
+
+    /**
+     * Стабилизация рамы после остановки: столько опросов "остановлен" подряд
+     * (каждый через SETTLE_POLL_MS — не менее ~100 мс непрерывного стопа)
+     * требуется до начала сканирования.
+     */
+    private static final int SETTLE_STOP_SAMPLES = 6;
+    private static final int SETTLE_POLL_MS = 20;
 
     // ==================== Транспорт ====================
 
     private final CanBus bus;
     private final long responseTimeoutMs;
     private int nodeId;
+    private int maxSpeedRpm = DEFAULT_SPEED_RPM;
+    private int maxAccel = DEFAULT_ACCEL;
 
     public Mks42dController(CanBus bus) {
         this(bus, DEFAULT_NODE_ID, DEFAULT_RESPONSE_TIMEOUT_MS);
@@ -172,8 +186,11 @@ public class Mks42dController implements AutoCloseable {
      * Кадры с битым Check или чужим op_code отбрасываются.
      *
      * @return payload ответа (включая op_code), или null по таймауту.
+     *
+     * <p>Synchronized: на шину ходят и главный поток, и фоновый трекер энкодера —
+     * без лока чужой запрос/ответ мог бы "просочиться" в чужой цикл ожидания.
      */
-    private byte[] transact(byte op, int... args) {
+    private synchronized byte[] transact(byte op, int... args) {
         bus.send(nodeId, buildFrame(op, args));
         long deadline = System.currentTimeMillis() + responseTimeoutMs;
         while (System.currentTimeMillis() < deadline) {
@@ -247,16 +264,19 @@ public class Mks42dController implements AutoCloseable {
     // ==================== Управление движением ====================
 
     /**
-     * Движение к абсолютному углу, затем ожидание остановки.
+     * Движение к абсолютному углу, затем ожидание остановки и стабилизации рамы.
      * Профиль скорости/ускорения — по дистанции от текущей позиции
-     * (мелкие шаги медленнее: тяжёлая голова не должна тормозить "в упор").
+     * (мелкие шаги медленнее: тяжёлая голова не должна тормозить "в упор"),
+     * с ограничением maxSpeedRpm/maxAccel (tuneMotion).
      *
-     * @return true, если мотор остановился в пределах таймаута.
+     * @return true, если мотор остановился и провисел без движения
+     *         (SETTLE_STOP_SAMPLES опросов подряд) в пределах таймаута.
      */
     public boolean turnToAbsoluteAngle(double degrees) {
         double dist = Math.abs(degrees - getAngle());
-        turnToAbsoluteAngle(degrees, speedForDistance(dist), accelForDistance(dist));
-        return waitIdle(DEFAULT_MOVE_TIMEOUT_MS);
+        turnToAbsoluteAngle(degrees, Math.min(speedForDistance(dist), maxSpeedRpm),
+                Math.min(accelForDistance(dist), maxAccel));
+        return waitSettled(DEFAULT_MOVE_TIMEOUT_MS);
     }
 
     /**
@@ -272,15 +292,15 @@ public class Mks42dController implements AutoCloseable {
 
     /**
      * Профиль скорости по дистанции хода: мелкие шаги — минимальная скорость
-     * и acc. Тяжёлая голова на подшипниках тормозит из 20 rpm в упор и впадает
-     * в автоколебания; на 1 rpm позиционный контур удерживает её легко.
+     * и acc. Тяжёлая голова на подшипниках из 5 rpm в упор почти не
+     * перепрыгивает; на 1 rpm позиционный контур удерживает её легко.
      */
     static int speedForDistance(double distDeg) {
         if (distDeg <= 1.0) {
             return 1;
         }
         if (distDeg <= 10.0) {
-            return 10;
+            return 3;
         }
         return DEFAULT_SPEED_RPM;
     }
@@ -293,7 +313,7 @@ public class Mks42dController implements AutoCloseable {
             return 5;
         }
         if (distDeg <= 10.0) {
-            return 20;
+            return 8;
         }
         return DEFAULT_ACCEL;
     }
@@ -377,6 +397,53 @@ public class Mks42dController implements AutoCloseable {
             System.err.println("[CAN] WARNING: мотор не остановился за " + timeoutMs + " ms");
         }
         return stopped;
+    }
+
+    /**
+     * Ограничители профиля хода: скорость/ускорение не выше указанных.
+     * Позволяют подогнать "мягкость" привода без пересборки
+     * (флаги --rpm/--acc в MainOrchestrator). Значения <= 0 — не менять.
+     */
+    public void tuneMotion(int maxSpeedRpm, int maxAccel) {
+        if (maxSpeedRpm > 0) {
+            if (maxSpeedRpm > SPEED_LIMIT_RPM) {
+                throw new IllegalArgumentException("Max speed должен быть 1.." + SPEED_LIMIT_RPM + ", получен " + maxSpeedRpm);
+            }
+            this.maxSpeedRpm = maxSpeedRpm;
+        }
+        if (maxAccel > 0) {
+            if (maxAccel > ACCEL_LIMIT) {
+                throw new IllegalArgumentException("Max accel должен быть 1.." + ACCEL_LIMIT + ", получен " + maxAccel);
+            }
+            this.maxAccel = maxAccel;
+        }
+        System.out.println("[CAN] motion limits: speed <= " + maxSpeedRpm + " rpm, accel <= " + maxAccel);
+    }
+
+    /**
+     * Ждём остановки мотора и стабилизации рамы: SETTLE_STOP_SAMPLES опросов
+     * "остановлен" подряд (каждый через SETTLE_POLL_MS — не менее ~100 мс
+     * непрерывного стопа). Покачивание после торможения (эластичный ремень)
+     * гасится до начала сканирования.
+     *
+     * @return true, если мотор остановился и стабилизировался в пределах таймаута.
+     */
+    public boolean waitSettled(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        int consecutiveStops = 0;
+        while (System.currentTimeMillis() < deadline) {
+            if (isStopped()) {
+                consecutiveStops++;
+                if (consecutiveStops >= SETTLE_STOP_SAMPLES) {
+                    return true;
+                }
+            } else {
+                consecutiveStops = 0;
+            }
+            sleep(SETTLE_POLL_MS);
+        }
+        System.err.println("[CAN] WARNING: рама не стабилизировалась за " + timeoutMs + " ms");
+        return false;
     }
 
     // ==================== Зануление / homing / калибровка ====================
@@ -541,9 +608,10 @@ public class Mks42dController implements AutoCloseable {
         return readSystemParameter(code, responseTimeoutMs);
     }
 
-    public byte[] readSystemParameter(int code, long timeoutMs) {
+    public synchronized byte[] readSystemParameter(int code, long timeoutMs) {
         // Ответ на 0x00 начинается с КОДА ПАРАМЕТРА, а не с op 0x00 — поэтому
         // transact() (ищет data[0] == op) тут годится только через собственный цикл.
+        // Synchronized — как у transact(): один обмен на шину за раз.
         bus.send(nodeId, buildFrame(OP_READ_SYSTEM_PARAMS, code & 0xFF));
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
