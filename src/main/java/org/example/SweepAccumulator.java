@@ -53,7 +53,7 @@ public final class SweepAccumulator {
      *
      * @param slicePoints   точки среза (каждая несёт свой frameAngleDeg)
      * @param frameAngleNow текущий угол рамы, град
-     * @param dirSign       +1 (CCW, угол растёт) или -1 (CW, угол уменьшается)
+     * @param dirSign       знак фактического движения энкодера: +1 (угол растёт) / -1 (уменьшается)
      */
     public List<SweepPoint> addAndWindow(List<SweepPoint> slicePoints, double frameAngleNow, int dirSign) {
         if (Double.isNaN(frameAngleNow)) {

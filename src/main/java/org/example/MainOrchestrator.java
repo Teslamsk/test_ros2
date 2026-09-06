@@ -187,22 +187,27 @@ public class MainOrchestrator {
 
     private static void runSweep(TopicInterface ros, Mks42dController can, double sweepDeg,
                                  double tensionDeg, boolean clockwise, int sweepRpm,
-                                 int merge, double maxRangeM, int minConfidence) throws Exception {
-        // CW: энкодер идёт в минус (угол уменьшается) -> прогресс = -угол; CCW: +угол.
-        int dirSign = clockwise ? -1 : +1;
+                                  int merge, double maxRangeM, int minConfidence) throws Exception {
         System.out.printf("[MAIN] Sweep mode: base %.1f deg, dir %s, motor %d rpm (base %.2f deg/s),"
                         + " tension %.2f deg, merge %d, maxRange %.1f m, window %.2f deg%n",
                 sweepDeg, clockwise ? "CW" : "CCW", sweepRpm, sweepRpm / GEAR_RATIO,
                 tensionDeg, merge, maxRangeM, SWEEP_WINDOW_DEG);
 
-        can.setZero(); // текущая позиция = 0 (ручная установка лидара в старт)
+        // init() уже занулил позицию в текущем (ручном стартовом) положении;
+        // повторный 0x92 привод не подтверждает, поэтому просто читаем текущий
+        // угол как стартовый — вся логика свипа относительна его.
         double initialFrameAngle = can.getAngle() / GEAR_RATIO;
+        System.out.printf("[MAIN] start angle: frame %.2f deg (motor %.2f deg)%n",
+                initialFrameAngle, initialFrameAngle * GEAR_RATIO);
 
         // Фоновый трекер угла рамы (мотор/4) в единой wall-clock эпохе
         EncoderTracker enc = new EncoderTracker(() -> can.getAngle() / GEAR_RATIO, ENCODER_POLL_MS);
         try {
             can.speedMove(clockwise, sweepRpm, SWEEP_ACCEL);
-            waitForFrameMoving(can, initialFrameAngle, WAIT_MOVING_TIMEOUT_MS);
+            // Направление не угадываем из флага: читаем фактический знак движения с энкодера.
+            int dirSign = waitForFrameDirection(can, initialFrameAngle, WAIT_MOVING_TIMEOUT_MS);
+            System.out.printf("[MAIN] encoder direction: %s (dirSign %d)%n",
+                    dirSign > 0 ? "angle increasing" : "angle decreasing", dirSign);
 
             SweepAccumulator acc = new SweepAccumulator(SWEEP_WINDOW_DEG, OUTLIER_TOLERANCE);
             xyzOut = XyzWriter.open(sweepXyzPath());
@@ -254,19 +259,20 @@ public class MainOrchestrator {
      * заданной, разгон до 90% скорости и рекомендуемый --tension.
      */
     private static void runCalibrate(Mks42dController can, double sweepDeg,
-                                     boolean clockwise, int sweepRpm) throws Exception {
-        int dirSign = clockwise ? -1 : +1;
+                                      boolean clockwise, int sweepRpm) throws Exception {
         double targetDegPerSec = sweepRpm / GEAR_RATIO * 6.0;
         System.out.printf("[CAL] Calibrate: base %.1f deg, dir %s, motor %d rpm (target %.2f deg/s)%n",
                 sweepDeg, clockwise ? "CW" : "CCW", sweepRpm, targetDegPerSec);
 
-        can.setZero();
+        // init() уже занулил позицию — читаем текущий угол как стартовый.
         double initialFrameAngle = can.getAngle() / GEAR_RATIO;
 
         EncoderTracker enc = new EncoderTracker(() -> can.getAngle() / GEAR_RATIO, ENCODER_POLL_MS);
+        int dirSign = 0; // определяется по фактическому движению энкодера в try
         try {
             can.speedMove(clockwise, sweepRpm, SWEEP_ACCEL);
-            waitForFrameMoving(can, initialFrameAngle, WAIT_MOVING_TIMEOUT_MS);
+            // Направление не угадываем из флага: читаем фактический знак движения с энкодера.
+            dirSign = waitForFrameDirection(can, initialFrameAngle, WAIT_MOVING_TIMEOUT_MS);
             double nominalSec = sweepDeg / targetDegPerSec;
             long deadline = System.currentTimeMillis() + (long) (nominalSec * 3000); // 3x номинал
             double progress = 0;
@@ -387,14 +393,22 @@ public class MainOrchestrator {
         return m;
     }
 
-    /** Ждём, пока рама реально тронется (угол сдвинется на eps от стартового). */
-    private static void waitForFrameMoving(Mks42dController can, double initialFrameAngle, long timeoutMs)
+    /**
+     * Ждём, пока рама реально тронется (угол сдвинется на eps от стартового),
+     * и определяем фактическое направление вращения энкодера:
+     * +1 — угол растёт, -1 — уменьшается. Направление НЕ угадывается из флага
+     * --direction (на разных сборках оно разное): оно читается с энкодера,
+     * поэтому прогресс progress = dirSign * (угол - старт) всегда положительный
+     * и свип корректно завершается на любом железе.
+     */
+    private static int waitForFrameDirection(Mks42dController can, double initialFrameAngle, long timeoutMs)
             throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             double a = can.getAngle() / GEAR_RATIO;
-            if (Math.abs(a - initialFrameAngle) > WAIT_MOVING_EPS_DEG) {
-                return;
+            double d = a - initialFrameAngle;
+            if (Math.abs(d) > WAIT_MOVING_EPS_DEG) {
+                return d > 0 ? +1 : -1;
             }
             Thread.sleep(50);
         }

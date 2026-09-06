@@ -96,9 +96,29 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
      `mergeBucket`.
    - тесты: AngleBufferTest (5), EncoderTrackerTest (2), SweepAccumulatorTest (3),
      TopicSweepTest (5).
-   - JDK 17 грабли: `AtomicDouble` отсутствует (брать `AtomicReference<Double>`),
-     JUnit 5.9.3 без `assertDoubleNaN` (брать `assertTrue(Double.isNaN(x))`),
-     fastddsjava `IDLFloatSequence` без `set(int,float)` (только add/get/size).
+    - JDK 17 грабли: `AtomicDouble` отсутствует (брать `AtomicReference<Double>`),
+      JUnit 5.9.3 без `assertDoubleNaN` (брать `assertTrue(Double.isNaN(x))`),
+      fastddsjava `IDLFloatSequence` без `set(int,float)` (только add/get/size).
+    - **Особенность MKS 42D (проверено на железе):** `0x92` (setZero) привод
+      подтверждает ТОЛЬКО ОДИН РАЗ за enable-цикл (после `0xF8 enable=true`);
+      повторный `0x92` без нового enable ответа не шлёт → `writeOk` падал
+      «нет ответа на команду 0x92» (step работал — у него нет второго setZero).
+      Поэтому `init()` зануляет один раз, `runSweep`/`runCalibrate` setZero НЕ
+       зовут — стартуют от текущего (нулевого) угла, логика относительная. Для
+       повторного нуля (перестановка рамы) — сначала disable (`0xF8 =0`) + enable.
+    - **Направление свипа (баг, проверено на железе):** раньше `dirSign` угадывался
+      из флага как `cw ? -1 : +1` (предполагалось: при CW угол энкодера уменьшается).
+      На этом стенде при `speedMove(CW)` (0x80) угол РАСТЁТ → прогресс уходил в минус,
+      цикл `while (progress < sweepDeg)` никогда не заканчивался (мотор крутил до
+      Ctrl-C, xyz 0 pts). Фикс: `dirSign` НЕ угадывается — `waitForFrameDirection()`
+      читает фактический знак движения с энкодера после старта (+1 угол растёт / -1
+      падает) и подбирает его так, чтобы прогресс был положительным. Сырой угол
+      энкодера (со своим знаком) уходит в облако (`toWorldPoint`), поэтому геометрия
+      не зависит от dirSign; флаг `--direction` теперь только задаёт, куда крутить
+      мотор (0x80/0x00). Работает на любой сборке.
+    - **init-ретраи:** стартовые команды init (e-stop/mode/enable/zero) повторяются
+      до 3 раз с паузой 500 мс при «нет ответа» (привод после включения/аварии может
+      пару сотен мс молчать; раньше первый запуск умирал на 0xF7).
 - `TopicInterface.java`: ROS2-нод; аккумулятор `cloudPoints` (List<float[]>),
   снапшот `getCloudPoints()`; PointCloud2 с 3×FLOAT32, point_step=12. frame_id облака
   копируется из /scan (21.08; раньше хардкод "world" — PointCloud2 в RViz было не видно

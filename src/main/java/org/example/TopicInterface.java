@@ -154,7 +154,8 @@ public class TopicInterface {
      *
      * @param scan         срез лидара
      * @param angleAt      источник угла рамы по wall-clock (ns)
-     * @param dirSign      +1 (CCW) / -1 (CW)
+     * @param dirSign      знак фактического движения энкодера (+1 угол растёт / -1 падает),
+     *                     подбирается так, чтобы прогресс был положительным
      * @param tensionDeg   зона натяжения у старта, град (прогресс)
      * @param maxRangeM    ограничение дальности, м (<= rangeMax сенсора)
      * @param minIntensity порог интенсивности 0..255 (0 — фильтр выключен)

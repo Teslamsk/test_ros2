@@ -110,6 +110,10 @@ public class Mks42dController implements AutoCloseable {
 
     private static final int DEFAULT_RESPONSE_TIMEOUT_MS = 100;
     private static final int POLL_INTERVAL_MS = 10;
+    /** Стартовые команды init: сколько раз повторять при «нет ответа». */
+    private static final int INIT_RETRY_ATTEMPTS = 3;
+    /** Пауза между повторами стартовой команды init, мс. */
+    private static final int INIT_RETRY_DELAY_MS = 500;
     private static final int DEFAULT_MOVE_TIMEOUT_MS = 15000;
     private static final int HOME_TIMEOUT_MS = 20000;
     private static final int CALIBRATION_TIMEOUT_MS = 30000;
@@ -237,15 +241,32 @@ public class Mks42dController implements AutoCloseable {
     public void init(String iface) {
         bus.open(iface);
         System.out.println("[CAN] MKS 42D node 0x" + toHex(nodeId) + " init on " + iface);
-        try {
-            emergencyStop();
-        } catch (IllegalStateException e) {
-            System.err.println("[CAN] emergencyStop во время init не получило ответа: " + e.getMessage());
-        }
-        setWorkMode(MODE_SR_VFOC);
-        enable(true);
-        setZero();
+        // Стартовые команды с ретраями: после включения/аварийного стопа привод
+        // может пару сотен миллисек не отвечать на первые кадры.
+        initCommand("emergencyStop", this::emergencyStop);
+        initCommand("work mode", () -> setWorkMode(MODE_SR_VFOC));
+        initCommand("enable", () -> enable(true));
+        initCommand("zero", this::setZero);
         System.out.println("[CAN] MKS 42D node 0x" + toHex(nodeId) + " готов");
+    }
+
+    /**
+     * Стартовая команда init с ретраями: если привод не ответил (таймаут),
+     * повторяем INIT_RETRY_ATTEMPTS раз с паузой INIT_RETRY_DELAY_MS.
+     */
+    private void initCommand(String name, Runnable cmd) {
+        for (int i = 0; ; i++) {
+            try {
+                cmd.run();
+                return;
+            } catch (IllegalStateException e) {
+                if (i >= INIT_RETRY_ATTEMPTS - 1) {
+                    throw e;
+                }
+                System.err.println("[CAN] " + name + ": нет ответа, повтор " + (i + 1) + "/" + INIT_RETRY_ATTEMPTS);
+                sleep(INIT_RETRY_DELAY_MS);
+            }
+        }
     }
 
     /**
