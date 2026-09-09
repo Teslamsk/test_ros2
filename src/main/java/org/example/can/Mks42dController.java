@@ -114,14 +114,14 @@ public class Mks42dController implements AutoCloseable {
     private static final int INIT_RETRY_ATTEMPTS = 3;
     /** Пауза между повторами стартовой команды init, мс. */
     private static final int INIT_RETRY_DELAY_MS = 500;
-    private static final int DEFAULT_MOVE_TIMEOUT_MS = 15000;
+    private static final int DEFAULT_MOVE_TIMEOUT_MS = 120000;
     private static final int HOME_TIMEOUT_MS = 20000;
     private static final int CALIBRATION_TIMEOUT_MS = 30000;
     /**
-     * Дефолтные скорость/ускорение — пониженный профиль против "перебега"
-     * и откатов эластичного ремня (радиальная "ребристость" облака).
+     * Дефолтные скорость/ускорение для больших ходов (мелкие шаги ≤10° идут
+     * по профилю 1–3 rpm против "перебега" и откатов эластичного ремня).
      */
-    private static final int DEFAULT_SPEED_RPM = 5;
+    private static final int DEFAULT_SPEED_RPM = 25;
     private static final int DEFAULT_ACCEL = 25;
 
     /**

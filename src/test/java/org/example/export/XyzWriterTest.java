@@ -44,4 +44,16 @@ class XyzWriterTest {
         String content = Files.readString(file, StandardCharsets.UTF_8);
         assertEquals("1.0 2.0 3.0\n4.0 5.0 6.0\n", content);
     }
+
+    @Test
+    void streamWritesColoredPointsAsSixColumns() throws Exception {
+        // p = {x, y, z, intensity, r, g, b} → файл "x y z r g b" (RGB 0..255, без intensity).
+        Path file = Files.createTempFile("xyzc", ".xyz");
+        try (XyzWriter.Stream s = XyzWriter.open(file)) {
+            s.writeColoredPoint(new float[]{1.0f, 2.0f, 3.0f, 200f, 10f, 200f, 255f});
+            assertEquals(1, s.count());
+        }
+        String content = Files.readString(file, StandardCharsets.UTF_8);
+        assertEquals("1.0 2.0 3.0 10 200 255\n", content);
+    }
 }

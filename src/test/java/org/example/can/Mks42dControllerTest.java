@@ -119,7 +119,7 @@ class Mks42dControllerTest {
     @Test
     void blockingTurnUsesDistanceProfileAndWaitsSettled() {
         MockCanBus mock = new MockCanBus();
-        // дефолт (профиль по дистанции): из 0° на 180° -> 5 rpm = 0x05, acc 25 = 0x19, axis 8192
+        // дефолт (профиль по дистанции): из 0° на 180° -> 25 rpm = 0x19, acc 25 = 0x19, axis 8192
         mock.queue(1, resp(1, 0x31, 0, 0, 0, 0, 0, 0)); // текущая позиция: 0°
         mock.queue(1, resp(1, 0xF5, 1));               // движение принято
         // 6 опросов "остановлен" подряд — рама стабилизировалась (~100 мс)
@@ -132,9 +132,9 @@ class Mks42dControllerTest {
 
             List<MockCanBus.CanFrame> tx = mock.getTxLog();
             assertEquals(8, tx.size());
-            // axis 8192 = 0x00002000 → [00 20 00]; crc = 1+F5+00+05+19+20 = 0x34
+            // axis 8192 = 0x00002000 → [00 20 00]; crc = 1+F5+00+19+19+20 = 0x48
             assertArrayEquals(
-                    new byte[]{(byte) 0xF5, 0x00, 0x05, 0x19, 0x00, 0x20, 0x00, 0x34},
+                    new byte[]{(byte) 0xF5, 0x00, 0x19, 0x19, 0x00, 0x20, 0x00, 0x48},
                     tx.get(1).data);
             assertArrayEquals(new byte[]{(byte) 0xF1, (byte) 0xF2}, tx.get(2).data);
         }
@@ -148,8 +148,8 @@ class Mks42dControllerTest {
         // <= 10 deg — 3 rpm / acc 8
         assertEquals(3, Mks42dController.speedForDistance(5.0));
         assertEquals(8, Mks42dController.accelForDistance(5.0));
-        // > 10 deg — пониженные дефолты 5 rpm / acc 25
-        assertEquals(5, Mks42dController.speedForDistance(90.0));
+        // > 10 deg — дефолты 25 rpm / acc 25
+        assertEquals(25, Mks42dController.speedForDistance(90.0));
         assertEquals(25, Mks42dController.accelForDistance(90.0));
     }
 
@@ -246,7 +246,7 @@ class Mks42dControllerTest {
 
     @Test
     void tuneMotionCapsProfile() {
-        // Ограничители 2 rpm / acc 10 — профиль 180° (5/25) упирается в них
+        // Ограничители 2 rpm / acc 10 — профиль 180° (25/25) упирается в них
         MockCanBus mock = new MockCanBus();
         mock.queue(1, resp(1, 0x31, 0, 0, 0, 0, 0, 0));
         mock.queue(1, resp(1, 0xF5, 1));

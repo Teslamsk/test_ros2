@@ -7,6 +7,68 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
 положений собирается облако точек; далее постобработка (мерж/меш/сечения) и передача
 инженеру в SolidWorks.
 
+## VLP-16 (ветка `vlp-16`, 06.09)
+Отдельная ветка: сборка 3D-облака с Velodyne VLP-16 (16-лучевой 360° лидар) на раме
+MKS 42D (та же база, что D500). Лидар смонтирован с ГORIZОНТАЛЬНОЙ осью вращения,
+вращается сам (~5 об/с); рама поворачивается шагами вокруг вертикальной Z.
+Точки приходят по ROS2-топику `/velodyne_points` (PointCloud2) от официального
+ROS2-драйвера velodyne (он сам делает UDP-перехват, парсинг, калибровку каналов) —
+raw-UDP-пайплайн (Vlp16Main/Parser/Receiver/Scanner, 06.09) УДАЛЁН как заменённый
+драйвером. D500-путь (step/sweep) в этой ветке не используется, но его код не тронут.
+
+- `org.example.vlp16.Vlp16Orchestrator` — точка входа (step-режим). Fat-JAR
+  (shade, `java -jar` = эта программа): `java -jar ros2-demo-1.0-SNAPSHOT.jar can0
+   --sweep 360 --step 10.3 --window 1000 --max-range 20 --height 0.4
+   [--min-intensity 0] [--topic /velodyne_points] [--current/--hold MA]
+   [--rpm/--acc N]` (D500-путь — по-прежнему `java -cp ... org.example.MainOrchestrator`).
+  Программа испытаний на железе — `VLP16_TRIAL.md` (список строк для терминала).
+  Каждый шаг: `turnToAbsoluteAngle` (ход + остановка + стабилизация) → окно
+  удержания `--window` мс (рама неподвижна: все точки окна помечаются текущим углом
+  рамы A_n с энкодера, per-point time не нужен) → трансформ + фильтр → стриминг
+  XYZ (`scan_export/vlp16_step_<stamp>.xyz`, partial по Ctrl-C через shutdown hook)
+  + срез в `/pointCloud` (RViz: Fixed frame = base, Display = Accumulate).
+  Не-кратный шаг (деф. 10.3°) выбран симуляцией покрытия (numpy,
+  `vlp16_coverage_sim.py`): объём 175 634 воксела 0.2 м (L=20, H=0.4), 99% покрытия
+  в ~212 шагах ≈ 3 мин, 90% — Δ=13.7° в 55 шагов; кратные шаги (5/30/45°)
+  насыщаются (77/37/28%) из-за совпадения с шагом азимута 360/1024.
+- Standalone (без CAN/рамы, до её сборки): `java -cp <jar> org.example.vlp16.Vlp16Cloud`
+  — окно за окном публикует /pointCloud с углом рамы 0; проверяет драйвер/QoS/
+  парсер/монтажку по статичной сцене (лидар на столе в монтажной ориентации).
+  Раздел 0 `VLP16_TRIAL.md`.
+- `Vlp16Cloud` — ROS2-нод: подписка на `/velodyne_points` (BEST_EFFORT + KEEP_LAST
+  + depth 100 — best_effort pub + reliable sub несовместимы), синхронный буфер
+  (`collectPoints(holdMs)` — clear + ожидание до deadline), публикация среза в
+  `/pointCloud` (4×FLOAT32, little-endian, frame `base`). Парсинг PointCloud2 —
+  по ИМЯ поля: x/y/z обязательные, intensity опциональное (любое числовое dtype:
+  UINT8/16/32, INT8/16/32, FLOAT32/64; offset/point_step/endianness — из
+  сообщения); ring/time игнорируются.
+- `Vlp16Mount` — монтаж: фиксированный 3×3 поворот системы координат лидара в раму
+  (ось z лидара → +X рамы, forward x_l → вверх, y_l → −Y; `DEFAULT_MATRIX =
+  {{0,0,1},{0,-1,0},{1,0,0}}`, det=1) + поворот на A_n вокруг Z рамы + высота
+  `DEFAULT_HEIGHT` (0.4 м). Константы под подгонку по RViz/CloudCompare (конвенция
+  как `UP_SIGN`/`CHANNEL_ANGLES_DEG`).
+- Фильтр точки: пропустить non-finite (NaN/Inf), zero (0,0,0 — нет возврата),
+  r > `--max-range`, intensity < `--min-intensity` (0 = выключен).
+- GEAR_RATIO (17:1) — локальная константа Vlp16Orchestrator. НЕ связана с
+  MainOrchestrator (D500: 4:1) — при смене редукции менять только константу
+  своей программы. Известный риск: редуктор рамы может давать артефакты
+  НЕРАВНОМЕРНОГО поворота (в step-режиме рама неподвижна во окне, так что
+  артефакты проявятся в переходе между шагами) — при «ребристости»/неравных
+  кольцах в облаке подозревать редуктор раньше монтировки.
+- Тесты: `Vlp16MountTest` (5 — матрица/поворот/высота), `Vlp16CloudParseTest` (7 —
+  синтетические PointCloud2: стандартный layout, extra-поля по offset, UINT8
+  intensity, big-endian, без intensity, multi-row, невалидные), `Vlp16OrchestratorTest`
+  (4 — фильтр + трансформ).
+- Лидар: 192.168.1.201, UDP 2368 (стандартный VLP-16-порт). IP нужен только
+  ROS2-драйверу (`device_ip:=192.168.1.201`); Java-программа IP не использует —
+  только ROS2-топик `/velodyne_points`.
+- ВАЖНО (сверить на железе): `ros2 topic info /velodyne_points --verbose` (имя/
+  QoS) и `ros2 topic echo /velodyne_points --once` (layout: поля x/y/z/intensity,
+  scale FLOAT32, point_step 16 — типовой velodyne layout, но парсер не зависит от
+  layout). Монтировка: глянуть в RViz/CloudCompare, при «лежит не так» —
+  `Vlp16Mount` (матрица/знак/высота). Потеря UDP-пакетов драйвером теперь не сдвигает
+  азимут (driver-внутренний счётчик), но может давать пропуски в кольцах.
+
 ## Сборка и тесты
 - `mvn -o -q compile test` (offline; local repo `C:\Users\borodin\.m2`).
 - SocketCanBus (Linux): `libcanwrapper-<arch>.so` ВШИТЫ в jar как ресурсы
@@ -23,7 +85,9 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
 - Тесты: JUnit 5 (surefire): Mks42dControllerTest, ScanMergerTest, SliceTransformTest,
   E57WriterTest, XyzWriterTest, LiDARReaderTest, DxfWriterTest, SingleScanTest
   (standalone-путь лидара; без подключённого устройства — skip через assumption, а не failure),
-  AngleBufferTest, EncoderTrackerTest, SweepAccumulatorTest, TopicSweepTest (05.09: sweep-режим).
+    AngleBufferTest, EncoderTrackerTest, SweepAccumulatorTest, TopicSweepTest (05.09: sweep-режим),
+    Vlp16MountTest, Vlp16CloudParseTest, Vlp16OrchestratorTest (08.09: ветка vlp-16,
+    driver-topic: трансформ монтажа, парсинг PointCloud2, фильтр шага).
 
 ## Текущее состояние (состояние на 2026-09-05)
 - `MainOrchestrator.java`: цикл `turnToAbsoluteAngle` (0xF5 + waitIdle по 0xF1) →
@@ -199,6 +263,15 @@ PET-проект: Java 17 + ROS2 (jros2 1.5.1) + CAN 2.0A. Лидар D500 (LDRO
   STL-серия DTOF: LD06/LD19/STL-27L; только читает поток).
 
 ## Незакрытые
+- 06.09/08.09 (ветка `vlp-16`): VLP-16 driver-topic пайплайн (Vlp16Orchestrator/
+  Vlp16Cloud/Vlp16Mount) проверен только юнит-тестами (синтетические PointCloud2).
+  Проверить на железе: (1) запустить официальный ROS2-драйвер velodyne и подтвердить
+  `ros2 topic info /velodyne_points --verbose` (имя, QoS best_effort) +
+  `ros2 topic echo /velodyne_points --once` (layout: x/y/z/intensity FLOAT32,
+  point_step 16); (2) прогон `Vlp16Orchestrator` на раме MKS 42D: RViz
+  (Fixed frame = base, Display = Accumulate) — при «лежит не так» подгонять
+  `Vlp16Mount` (матрица/знак/высота) и шаг `--step`; (3) убедиться, что
+  стриминговый XYZ (`scan_export/vlp16_step_*.xyz`) открывается в CloudCompare.
 - 04.09: радиальная "ребристость" облака (коррекции CAN-контроллера + эластичность
   ремня) — софтверные меры применены (профиль 5/25, settle ~0,1 c, `--rpm`/`--acc`);
   05.09: дополнительно — sweep-режим (непрерывное вращение) как основная мера.

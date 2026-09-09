@@ -12,14 +12,15 @@ import java.nio.file.StandardOpenOption;
 import java.util.List;
 
 /**
- * Экспорт облака точек в ASCII-формат XYZ: одна строка "x y z" на точку.
- * Универсальный fallback: открывается везде (CloudCompare, SolidWorks, open3d...),
- * в отличие от PLY/PCD.
+ * Экспорт облака точек в ASCII-формат XYZ: одна строка "x y z" (или "x y z r g b"
+ * для цветных точек, {@link Stream#writeColoredPoint}) на точку. Универсальный
+ * fallback: открывается везде (CloudCompare, SolidWorks, open3d...), в отличие
+ * от PLY/PCD.
  *
  * <p>Два режима:
  * <ul>
  *  <li>{@link #write(Path, List)} — одноразовая выгрузка готового облака;</li>
- *  <li>{@link #open(Path)} — {@link Stream} для инкрементальной записи
+ *  <li> — {@link Stream} для инкрементальной записи
  *      (свип: точка дописывается по мере накопления, файл виден "на лету").</li>
  * </ul>
  */
@@ -69,6 +70,27 @@ public final class XyzWriter {
             writer.write(String.valueOf(p[1]));
             writer.write(' ');
             writer.write(String.valueOf(p[2]));
+            writer.write('\n');
+            count++;
+        }
+
+        /**
+         * Цветная точка: строка "x y z r g b" (6 колонок, RGB 0..255) — распознаётся
+         * CloudCompare как облако с цветом. {@code p = {x, y, z, intensity, r, g, b}}
+         * (intensity не пишется в файл — в нём уже закодирован цвет).
+         */
+        public void writeColoredPoint(float[] p) throws IOException {
+            writer.write(String.valueOf(p[0]));
+            writer.write(' ');
+            writer.write(String.valueOf(p[1]));
+            writer.write(' ');
+            writer.write(String.valueOf(p[2]));
+            writer.write(' ');
+            writer.write(String.valueOf(Math.round(p[4])));
+            writer.write(' ');
+            writer.write(String.valueOf(Math.round(p[5])));
+            writer.write(' ');
+            writer.write(String.valueOf(Math.round(p[6])));
             writer.write('\n');
             count++;
         }
