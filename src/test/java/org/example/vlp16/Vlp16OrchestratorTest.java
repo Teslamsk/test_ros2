@@ -48,6 +48,13 @@ class Vlp16OrchestratorTest {
     }
 
     @Test
+    void lidarOffsetRotatesRawSliceAroundLidarZ() {
+        List<float[]> raw = List.of(new float[]{1f, 0f, 0f, 128f});
+        List<float[]> out = Vlp16Orchestrator.transformAndFilter(raw, 0.0, 90.0, 0.5f, 20.0, 0);
+        assertPoint(new float[]{0f, -1f, 0.5f, 128f}, out.get(0), 1e-4f);
+    }
+
+    @Test
     void filtersByIntensity() {
         List<float[]> raw = List.of(
                 new float[]{1f, 0f, 0f, 50f},

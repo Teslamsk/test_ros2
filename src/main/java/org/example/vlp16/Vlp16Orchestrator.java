@@ -53,6 +53,7 @@ public final class Vlp16Orchestrator {
         String canIface = "can0";
         double sweepDeg = 360.0;      // ход рамы, град
         float stepDeg = 10.3f;        // шаг, град (не-кратный: 99% покрытия в ~212 шагах)
+        double lidarOffsetDeg = 0.0;
         int windowMs = 1000;          // окно удержания на позицию, ms (5 полных перерисовок колец)
         double maxRangeM = 20.0;      // ограничение дальности, м
         int minIntensity = 0;         // порог интенсивности 0..255 (0 = фильтр выключен)
@@ -70,6 +71,7 @@ public final class Vlp16Orchestrator {
                 switch (args[i]) {
                     case "--sweep":         sweepDeg = Double.parseDouble(args[++i]); break;
                     case "--step":          stepDeg = Float.parseFloat(args[++i]); break;
+                    case "--lidar-offset":    lidarOffsetDeg = Double.parseDouble(args[++i]); break;
                     case "--window":        windowMs = Integer.parseInt(args[++i]); break;
                     case "--max-range":     maxRangeM = Double.parseDouble(args[++i]); break;
                     case "--min-intensity": minIntensity = Integer.parseInt(args[++i]); break;
@@ -94,8 +96,8 @@ public final class Vlp16Orchestrator {
         } catch (NumberFormatException e) {
             fail("Некорректное числовое значение параметра: " + e.getMessage());
         }
-        validate(sweepDeg, stepDeg, windowMs, maxRangeM, minIntensity, colorExp, colorMode,
-                heightM, currentMa, holdMa, maxRpm, maxAcc);
+        validate(sweepDeg, stepDeg, lidarOffsetDeg, windowMs, maxRangeM, minIntensity, colorExp,
+                colorMode, heightM, currentMa, holdMa, maxRpm, maxAcc);
 
         System.out.println("=== VLP-16 Orchestrator (step) ===");
         Vlp16Cloud ros = new Vlp16Cloud("vlp16_node", topic);
@@ -121,8 +123,8 @@ public final class Vlp16Orchestrator {
             int steps = (int) Math.round(sweepDeg / stepDeg);
             System.out.printf("[VLP16] Step mode: frame %.1f deg, step %.1f deg (%d positions), "
                     + "window %d ms, motor = %.1fx frame%n", sweepDeg, stepDeg, steps + 1, windowMs, GEAR_RATIO);
-            System.out.printf("[VLP16] maxRange %.1f m, minIntensity %d (0=off), height %.2f m, topic %s%n",
-                    maxRangeM, minIntensity, heightM, topic);
+            System.out.printf("[VLP16] maxRange %.1f m, minIntensity %d (0=off), height %.2f m, "
+                    + "lidarOffset %.2f deg, topic %s%n", maxRangeM, minIntensity, heightM, lidarOffsetDeg, topic);
 
             xyzOut = XyzWriter.open(xyzPath());
             long t0 = System.currentTimeMillis();
@@ -139,7 +141,7 @@ public final class Vlp16Orchestrator {
                     double encoderFrameAngle = can.getAngle() / GEAR_RATIO;
                     double frameAngle = softwareFrameAngle(encoderFrameAngle);
                     List<float[]> raw = ros.collectPoints(windowMs);
-                    List<float[]> slice = transformAndFilter(raw, frameAngle, heightM, maxRangeM, minIntensity);
+                    List<float[]> slice = transformAndFilter(raw, frameAngle, lidarOffsetDeg, heightM, maxRangeM, minIntensity);
                     List<float[]> colored = colorize(slice, heightM, colorExp, colorMode);
                     for (float[] p : colored) {
                         xyzOut.writeColoredPoint(p);
@@ -172,6 +174,11 @@ public final class Vlp16Orchestrator {
 
     static List<float[]> transformAndFilter(List<float[]> raw, double frameAngleDeg,
                                             float heightM, double maxRangeM, int minIntensity) {
+        return transformAndFilter(raw, frameAngleDeg, 0.0, heightM, maxRangeM, minIntensity);
+    }
+
+    static List<float[]> transformAndFilter(List<float[]> raw, double frameAngleDeg, double lidarOffsetDeg,
+                                            float heightM, double maxRangeM, int minIntensity) {
         List<float[]> out = new ArrayList<>(raw.size());
         for (float[] p : raw) {
             float x = p[0], y = p[1], z = p[2], intensity = p[3];
@@ -189,11 +196,19 @@ public final class Vlp16Orchestrator {
             if (minIntensity > 0 && intensity < minIntensity) {
                 continue;
             }
-            float[] w = Vlp16Mount.toWorld(new float[]{x, y, z}, (float) frameAngleDeg,
+            float[] rotated = rotateLidarZ(x, y, z, lidarOffsetDeg);
+            float[] w = Vlp16Mount.toWorld(rotated, (float) frameAngleDeg,
                     Vlp16Mount.DEFAULT_MATRIX, heightM);
             out.add(new float[]{w[0], w[1], w[2], intensity});
         }
         return out;
+    }
+
+    static float[] rotateLidarZ(float x, float y, float z, double angleDeg) {
+        double a = Math.toRadians(angleDeg);
+        double c = Math.cos(a);
+        double s = Math.sin(a);
+        return new float[]{(float) (x * c - y * s), (float) (x * s + y * c), z};
     }
 
     /**
@@ -287,8 +302,8 @@ public final class Vlp16Orchestrator {
         }
     }
 
-    private static void validate(double sweepDeg, float stepDeg, int windowMs, double maxRangeM,
-                                  int minIntensity, int colorExp, String colorMode,
+    private static void validate(double sweepDeg, float stepDeg, double lidarOffsetDeg, int windowMs,
+                                  double maxRangeM, int minIntensity, int colorExp, String colorMode,
                                   float heightM, int currentMa, int holdMa,
                                   int maxRpm, int maxAcc) {
         if (sweepDeg <= 0 || sweepDeg > 360) {
@@ -296,6 +311,9 @@ public final class Vlp16Orchestrator {
         }
         if (stepDeg <= 0 || stepDeg > sweepDeg) {
             fail("--step должен быть в (0, sweep) град, получен " + stepDeg);
+        }
+        if (!Double.isFinite(lidarOffsetDeg) || Math.abs(lidarOffsetDeg) > 360) {
+            fail("--lidar-offset должен быть конечным и в [-360..360] град, получен " + lidarOffsetDeg);
         }
         if (windowMs < 100 || windowMs > 30_000) {
             fail("--window должен быть 100..30000 ms, получен " + windowMs);
@@ -343,6 +361,8 @@ public final class Vlp16Orchestrator {
               canIface       SocketCAN-интерфейс, Linux (по умолч. can0; на Windows — PcanBus, игнорируется)
               --sweep DEG    ход рамы, град (по умолч. 360)
               --step DEG     шаг, град (по умолч. 10.3 — не-кратный: 99% покрытия в ~212 шагах)
+              --lidar-offset DEG поворот сырого среза лидара вокруг его оси вращения (z_l), град (по умолч. 0);
+                                 поворачивает точки до привязки к раме
               --window MS    окно удержания на позицию, ms (по умолч. 1000 — 5 полных перерисовок колец)
               --max-range M  ограничение дальности, м (по умолч. 20)
               --min-intensity N порог интенсивности 0..255: точки с меньшей intensity
